@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, List, Optional
 from tradingagents.agents.utils.rating import RATINGS_5_TIER
 from tradingagents.batch.report import generate_summary_report, generate_ticker_report
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +49,7 @@ class BatchRunner:
         if graph is not None:
             self.graph = graph
         else:
+            from tradingagents.graph.trading_graph import TradingAgentsGraph
             self.graph = TradingAgentsGraph(config=self.config)
 
     def run(

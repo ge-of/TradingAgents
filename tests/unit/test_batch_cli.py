@@ -30,7 +30,7 @@ def _make_state(ticker, rating):
 
 
 class TestBatchCLI:
-    @patch("tradingagents.batch.runner.TradingAgentsGraph")
+    @patch("tradingagents.graph.trading_graph.TradingAgentsGraph")
     def test_batch_command_exists(self, mock_graph_cls):
         mock_graph = MagicMock()
         mock_graph.propagate.return_value = (
@@ -58,7 +58,7 @@ class TestBatchCLI:
         assert result.exit_code != 0
         assert "Invalid date" in result.output
 
-    @patch("tradingagents.batch.runner.TradingAgentsGraph")
+    @patch("tradingagents.graph.trading_graph.TradingAgentsGraph")
     def test_batch_output_contains_table(self, mock_graph_cls):
         mock_graph = MagicMock()
         mock_graph.propagate.side_effect = [
