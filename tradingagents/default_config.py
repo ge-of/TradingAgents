@@ -11,6 +11,10 @@ DEFAULT_CONFIG = {
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    "batch_save_dir": os.getenv(
+        "TRADINGAGENTS_BATCH_DIR",
+        os.path.join(_TRADINGAGENTS_HOME, "logs", "batch"),
+    ),
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",
