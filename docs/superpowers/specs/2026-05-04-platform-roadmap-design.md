@@ -22,12 +22,73 @@ Before Phase 2 (Screener) and Phase 3 (Data Provider Swap) can work, the data la
 **Fix (built as part of Phase 2):** Add a structured data access layer alongside the existing string-returning tools.
 
 - New module: `tradingagents/dataflows/structured.py`
-- Provides functions like `get_fundamentals_structured(ticker) -> Dict[str, float]` that call the same underlying vendor functions but parse the results into typed dicts/DataFrames.
 - The existing `@tool`-decorated functions and `route_to_vendor()` string outputs remain unchanged — agents continue to receive report strings.
 - The screener, portfolio optimizer, and `_fetch_returns()` (which currently imports yfinance directly at `trading_graph.py:191-221`) all use the structured layer instead.
 - When new data providers are added in Phase 3, they implement the structured contract directly, and the string-formatting layer wraps them for agent consumption.
 
 This is not a separate phase — it's built incrementally as part of Phases 2 and 3.
+
+### Concrete Schemas
+
+```python
+@dataclass
+class FundamentalsSnapshot:
+    """Structured fundamentals data for a single ticker at a point in time."""
+    ticker: str
+    as_of: str                          # YYYY-MM-DD
+    # Valuation
+    market_cap: Optional[float]         # USD
+    pe_ratio_trailing: Optional[float]
+    pe_ratio_forward: Optional[float]
+    price_to_book: Optional[float]
+    price_to_sales: Optional[float]
+    enterprise_value: Optional[float]   # USD
+    # Profitability
+    revenue_ttm: Optional[float]        # USD
+    net_income_ttm: Optional[float]     # USD
+    free_cash_flow: Optional[float]     # USD
+    profit_margin: Optional[float]      # decimal (0.15 = 15%)
+    roe: Optional[float]               # decimal
+    # Balance sheet
+    total_debt: Optional[float]         # USD
+    total_equity: Optional[float]       # USD
+    debt_to_equity: Optional[float]     # ratio
+    current_ratio: Optional[float]
+    # Dividends
+    dividend_yield: Optional[float]     # decimal
+    payout_ratio: Optional[float]       # decimal
+    # Growth
+    revenue_growth_yoy: Optional[float] # decimal
+    earnings_growth_yoy: Optional[float] # decimal
+    # Derived (computed, not from provider)
+    free_cash_flow_yield: Optional[float] # FCF / market_cap
+
+@dataclass
+class PriceHistory:
+    """OHLCV price history for a ticker."""
+    ticker: str
+    start: str                          # YYYY-MM-DD
+    end: str                            # YYYY-MM-DD
+    data: pd.DataFrame                  # columns: Date, Open, High, Low, Close, Volume
+    # Derived
+    high_52w: Optional[float]
+    low_52w: Optional[float]
+    proximity_to_52w_high: Optional[float]  # decimal (0.0 = at high, -0.2 = 20% below)
+
+@dataclass
+class IndicatorSeries:
+    """Technical indicator values for a ticker."""
+    ticker: str
+    indicator: str                      # e.g. "rsi", "macd"
+    as_of: str                          # YYYY-MM-DD
+    window: int                         # look-back days
+    values: pd.DataFrame                # indicator-specific columns
+    latest_value: Optional[float]       # most recent value for simple indicators (RSI, etc.)
+```
+
+**Vendor mapping:** Each provider module implements functions that return these schemas. For the initial yfinance implementation in `structured.py`, this means parsing the text output of existing yfinance functions (e.g., extracting `"P/E Ratio (TTM): 28.5"` → `pe_ratio_trailing: 28.5`). For new providers in Phase 3, they return structured data natively and a separate formatting function wraps it into report strings for `VENDOR_METHODS`.
+
+**Missing data:** All numeric fields are `Optional[float]`. When a provider doesn't have a field, it's `None`. Screener filters skip tickers where the filtered field is `None` (logged as a warning).
 
 ---
 
@@ -95,14 +156,14 @@ for r in results.ranked():
 
 `BatchRunner` owns its own report generation:
 - Extracts key fields from `final_state` (analyst reports, debate summaries, final decision) for each ticker.
-- Generates per-ticker markdown summaries and a consolidated ranking table.
-- Does not reuse the CLI's `save_report_to_disk()` directly — that function expects the interactive streaming state shape.
+- Generates per-ticker markdown summaries and a consolidated multi-ticker ranking table.
+- Does not reuse the CLI's `save_report_to_disk()` because batch output is a consolidated multi-ticker report, not single-ticker output. The per-ticker field extraction logic may be shared via a common helper in `tradingagents/batch/report.py`.
 
 ### Output
 
 - Consolidated markdown report saved to `~/.tradingagents/logs/batch/<date>/summary.md`
 - Per-ticker markdown summaries saved to `~/.tradingagents/logs/batch/<date>/<ticker>.md`
-- Per-ticker JSON state logs saved in the existing location (`~/.tradingagents/logs/<ticker>/<date>/`) by `propagate()` automatically
+- Per-ticker JSON state logs saved in the existing location (`~/.tradingagents/logs/<ticker>/TradingAgentsStrategy_logs/`) by `propagate()` automatically
 - Summary table printed to console with ticker, rating, and key metrics
 
 ### Files to Create/Modify
@@ -141,6 +202,7 @@ Filters are composable and config-driven. Each filter is a function that takes a
 screen = Screener(config=config)
 candidates = screen.run(
     universe="sp500",
+    date="2026-05-04",              # required — all metrics computed as-of this date
     filters={
         "pe_ratio": {"max": 15},
         "price_to_book": {"max": 1.5},
@@ -151,6 +213,8 @@ candidates = screen.run(
     limit=20,
 )
 ```
+
+The `date` parameter is required. All fundamental snapshots, price history, and technical indicators are computed as-of this date to prevent look-ahead bias. When chaining to batch via `--analyze`, the same date is passed through.
 
 **Built-in filters (initial set):**
 - P/E ratio (trailing, forward)
@@ -175,21 +239,45 @@ Static ticker lists stored in `screener/universes.py`. Lists are plain Python li
 
 Initial universes: S&P 500, NASDAQ 100, Dow 30. Users can pass a custom list.
 
-### Integration with Batch Mode
-
-Screener output is a list of tickers that plugs directly into `BatchRunner`:
+### Screener Result Type
 
 ```python
-candidates = screen.run(universe="sp500", filters={...})
+@dataclass
+class ScreenCandidate:
+    ticker: str
+    metrics: Dict[str, Optional[float]]  # filter key → value (e.g. {"pe_ratio": 12.3, ...})
+
+@dataclass
+class ScreenResult:
+    date: str
+    universe: str
+    filters_applied: Dict[str, Dict]
+    candidates: List[ScreenCandidate]    # passing tickers, sorted by sort_by
+    skipped: List[Tuple[str, str]]       # (ticker, reason) for tickers with missing data
+    
+    @property
+    def tickers(self) -> List[str]:
+        """Convenience: just the ticker symbols."""
+        return [c.ticker for c in self.candidates]
+```
+
+### Integration with Batch Mode
+
+Screener output plugs directly into `BatchRunner` via the `tickers` property:
+
+```python
+candidates = screen.run(universe="sp500", date="2026-05-04", filters={...})
 results = runner.run(candidates.tickers, "2026-05-04")
 ```
 
 ### CLI
 
 ```bash
-tradingagents screen --universe sp500 --preset value --limit 20
-tradingagents screen --universe sp500 --pe-max 15 --pb-max 1.5 --fcf-yield-min 0.05 --analyze
+tradingagents screen --universe sp500 --date 2026-05-04 --preset value --limit 20
+tradingagents screen --universe sp500 --date 2026-05-04 --pe-max 15 --pb-max 1.5 --fcf-yield-min 0.05 --analyze
 ```
+
+`--date` defaults to today if omitted.
 
 `--analyze` flag chains into batch mode automatically, running the full agent pipeline on screened candidates.
 
@@ -230,7 +318,9 @@ The existing data layer already supports this pattern. `route_to_vendor()` in `t
 **`tradingagents/dataflows/ibkr.py`**
 
 - Implements: `get_ibkr_stock()`, `get_ibkr_indicators()`, `get_ibkr_fundamentals()`, `get_ibkr_news()`, etc.
-- Each function implements the structured data contract (returns typed dicts/DataFrames matching the schema defined in `structured.py`). A formatting wrapper converts structured output to report strings for agent consumption via the existing `route_to_vendor()` path.
+- Each function implements the structured data contract (returns `FundamentalsSnapshot`, `PriceHistory`, etc. as defined in `structured.py`).
+- Separate string-formatting wrappers (e.g., `get_ibkr_stock_report()`) convert structured output to report strings and are registered in `VENDOR_METHODS` for agent consumption via `route_to_vendor()`.
+- The structured functions themselves (e.g., `get_ibkr_stock_structured()`) are called directly by the screener and portfolio optimizer, not through `VENDOR_METHODS`.
 - Connection via `ib_insync` library. Requires IB Gateway or TWS running locally.
 - Module-level connection manager (singleton) handles session lifecycle: connect on first data request, reuse across calls, disconnect on teardown.
 - Connection params from env vars: `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`.
@@ -272,6 +362,7 @@ The existing fallback logic in `route_to_vendor()` only catches `AlphaVantageRat
 - Each provider wraps its connection/HTTP/auth errors into `DataProviderError` subclasses.
 - `route_to_vendor()` catches `DataProviderError` (not just the Alpha Vantage variant) to trigger fallback.
 - Provider-specific errors (IBKR disconnect, Massive HTTP 5xx, yfinance rate limit) all inherit from `DataProviderError`.
+- **Existing providers must also be updated:** yfinance and Alpha Vantage functions currently catch broad exceptions and return `"Error ..."` strings (e.g., `y_finance.py:301`, `alpha_vantage_indicator.py:220`). These must be changed to raise `DataProviderError` on provider/network/auth failures, reserving return values for successful data or explicit no-data results. This is in scope for Phase 3.
 
 ### Direct yfinance Usage
 
@@ -285,6 +376,7 @@ Agent prompts, graph topology, CLI commands, screener, and batch mode. The swap 
 
 - **Create:** `tradingagents/dataflows/ibkr.py`, `tradingagents/dataflows/massive.py`, `tradingagents/dataflows/exceptions.py`
 - **Modify:** `tradingagents/dataflows/interface.py` (register new vendors in `VENDOR_METHODS`, broaden fallback to catch `DataProviderError`)
+- **Modify:** `tradingagents/dataflows/y_finance.py`, `tradingagents/dataflows/alpha_vantage_*.py` (replace error-string returns with `DataProviderError` raises)
 - **Modify:** `tradingagents/graph/trading_graph.py` (route `_fetch_returns()` through structured data layer)
 - **Modify:** `.env.example` (add `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MASSIVE_API_KEY`)
 
@@ -367,8 +459,8 @@ The per-ticker graph and its state schema (`AgentState` in `agent_states.py`) re
 - All per-ticker analysis summaries and ratings from the batch run
 - Current portfolio state (positions, weights, P&L)
 - Quantitative allocation proposal from 4b
-- Cross-ticker correlation data (computed from price history)
-- Past portfolio decisions from memory log
+- Cross-ticker correlation data (computed from price history via the structured data layer)
+- Past portfolio strategy decisions from `~/.tradingagents/portfolio/history.jsonl` (the portfolio-level change log, not the per-ticker `TradingMemoryLog`). The existing per-ticker memory log stores individual trading decisions and reflections; the strategist needs portfolio-level allocation history instead.
 
 **Produces a `StrategyDecision`:**
 ```python
@@ -437,8 +529,9 @@ Saved to `~/.tradingagents/portfolio/reports/<date>/`.
 ### Files to Create/Modify
 
 - **Create:** `tradingagents/portfolio/__init__.py`, `portfolio.py`, `store.py`, `optimizer.py`, `strategist.py`, `schemas.py`
-- **Create:** `tradingagents/agents/strategist/portfolio_strategist.py`
 - **Modify:** `cli/main.py` (add `portfolio` command group)
+
+Note: The strategist lives in `tradingagents/portfolio/strategist.py`, not under `tradingagents/agents/`. It is a portfolio-level orchestrator that calls the LLM directly (via `create_llm_client`), not a per-ticker graph node. Existing agents under `tradingagents/agents/` are all per-ticker graph nodes — the strategist is architecturally distinct.
 
 ---
 
