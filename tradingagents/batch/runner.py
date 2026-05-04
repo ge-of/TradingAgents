@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from tradingagents.agents.utils.rating import RATINGS_5_TIER
+from tradingagents.batch.report import generate_summary_report, generate_ticker_report
+from tradingagents.dataflows.utils import safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -78,4 +81,25 @@ class BatchRunner:
             batch.results.append(result)
             if on_ticker_done:
                 on_ticker_done(result)
+        self._save_reports(batch)
         return batch
+
+    def _save_reports(self, batch: BatchResult) -> None:
+        save_dir = self.config.get("batch_save_dir")
+        if not save_dir:
+            return
+        out = Path(save_dir) / batch.date
+        out.mkdir(parents=True, exist_ok=True)
+
+        (out / "summary.md").write_text(
+            generate_summary_report(batch), encoding="utf-8"
+        )
+        for result in batch.results:
+            try:
+                safe = safe_ticker_component(result.ticker)
+            except ValueError:
+                logger.warning("Skipping report save for unsafe ticker: %s", result.ticker)
+                continue
+            (out / f"{safe}.md").write_text(
+                generate_ticker_report(result), encoding="utf-8"
+            )
