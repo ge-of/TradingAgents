@@ -1217,5 +1217,90 @@ def analyze(
     run_analysis(checkpoint=checkpoint)
 
 
+@app.command()
+def batch(
+    tickers: str = typer.Option(..., help="Comma-separated ticker symbols (e.g. AAPL,MSFT,GOOGL)"),
+    date: str = typer.Option(
+        datetime.date.today().strftime("%Y-%m-%d"),
+        help="Trade date in YYYY-MM-DD format",
+    ),
+    provider: Optional[str] = typer.Option(None, help="LLM provider (openai, anthropic, google, etc.)"),
+    deep_model: Optional[str] = typer.Option(None, help="Model for deep analysis"),
+    quick_model: Optional[str] = typer.Option(None, help="Model for quick analysis"),
+):
+    """Run batch analysis across multiple tickers."""
+    from tradingagents.batch import BatchRunner
+
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        console.print(f"[red]Invalid date format: {date}. Expected YYYY-MM-DD.[/red]")
+        raise typer.Exit(1)
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        console.print("[red]No valid tickers provided.[/red]")
+        raise typer.Exit(1)
+
+    config = dict(DEFAULT_CONFIG)
+    if provider:
+        config["llm_provider"] = provider
+    if deep_model:
+        config["deep_think_llm"] = deep_model
+    if quick_model:
+        config["quick_think_llm"] = quick_model
+
+    console.print(
+        Panel(
+            f"[bold]Batch Analysis[/bold]\n"
+            f"Tickers: {', '.join(ticker_list)}\n"
+            f"Date: {date}\n"
+            f"Provider: {config['llm_provider']}",
+            title="TradingAgents Batch Mode",
+        )
+    )
+
+    def on_start(ticker, idx, total):
+        console.print(f"\n[bold cyan][{idx + 1}/{total}][/bold cyan] Analyzing {ticker}...")
+
+    def on_done(result):
+        if result.error:
+            console.print(f"  [red]FAILED:[/red] {result.error}")
+        else:
+            console.print(f"  [green]Rating:[/green] {result.rating}")
+
+    runner = BatchRunner(config=config)
+    results = runner.run(
+        ticker_list, date,
+        on_ticker_start=on_start,
+        on_ticker_done=on_done,
+    )
+
+    from tradingagents.batch.report import _extract_decision_summary
+
+    console.print("\n")
+    table = Table(title="Batch Results", box=box.ROUNDED)
+    table.add_column("Ticker", style="bold")
+    table.add_column("Rating")
+    table.add_column("Decision")
+    table.add_column("Status")
+
+    for r in results.ranked():
+        rating_color = {
+            "Buy": "green", "Overweight": "green",
+            "Hold": "yellow",
+            "Underweight": "red", "Sell": "red",
+        }.get(r.rating, "white")
+        status = f"[red]{r.error}[/red]" if r.error else "[green]OK[/green]"
+        decision = _extract_decision_summary(r, max_len=60) if not r.error else "N/A"
+        table.add_row(r.ticker, f"[{rating_color}]{r.rating}[/{rating_color}]", decision, status)
+
+    console.print(table)
+
+    save_dir = config.get("batch_save_dir")
+    if save_dir:
+        console.print(f"\n[dim]Reports saved to {save_dir}/{date}/[/dim]")
+
+
 if __name__ == "__main__":
     app()
