@@ -65,6 +65,7 @@ class TestBatchResult:
                 TickerResult("MSFT", "Hold", {"final_trade_decision": "Hold"}),
                 TickerResult("GOOGL", "Sell", {"final_trade_decision": "Sell"}),
                 TickerResult("NVDA", "Overweight", {"final_trade_decision": "Overweight"}),
+                TickerResult("AMZN", "Underweight", {"final_trade_decision": "Underweight"}),
                 TickerResult("BAD", "Hold", {}, error="failed"),
             ],
         )
@@ -72,7 +73,7 @@ class TestBatchResult:
     def test_ranked_ordering(self, batch):
         ranked = batch.ranked()
         ratings = [r.rating for r in ranked]
-        assert ratings == ["Buy", "Overweight", "Hold", "Hold", "Sell"]
+        assert ratings == ["Buy", "Overweight", "Hold", "Hold", "Underweight", "Sell"]
 
     def test_buys_returns_buy_and_overweight(self, batch):
         buys = batch.buys()
@@ -82,7 +83,7 @@ class TestBatchResult:
     def test_successful_excludes_errors(self, batch):
         ok = batch.successful()
         assert all(r.error is None for r in ok)
-        assert len(ok) == 4
+        assert len(ok) == 5
 
     def test_failed_includes_only_errors(self, batch):
         bad = batch.failed()
@@ -100,9 +101,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradingagents.batch'`
 Create `tradingagents/batch/__init__.py`:
 
 ```python
-from tradingagents.batch.runner import BatchRunner, TickerResult, BatchResult
+from tradingagents.batch.runner import TickerResult, BatchResult
 
-__all__ = ["BatchRunner", "TickerResult", "BatchResult"]
+__all__ = ["TickerResult", "BatchResult"]
 ```
 
 Create `tradingagents/batch/runner.py`:
@@ -191,6 +192,7 @@ class TestBatchRunner:
     def test_run_returns_batch_result(self, mock_graph):
         runner = BatchRunner(graph=mock_graph)
         result = runner.run(["AAPL", "MSFT"], "2026-05-04")
+
         assert isinstance(result, BatchResult)
         assert result.date == "2026-05-04"
         assert len(result.results) == 2
@@ -276,9 +278,15 @@ logger = logging.getLogger(__name__)
 
 
 class BatchRunner:
-    def __init__(self, graph, config=None):
-        self.graph = graph
-        self.config = config or {}
+    def __init__(self, config=None, graph=None):
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        self.config = config or DEFAULT_CONFIG.copy()
+        if graph is not None:
+            self.graph = graph
+        else:
+            from tradingagents.graph.trading_graph import TradingAgentsGraph
+            self.graph = TradingAgentsGraph(config=self.config)
 
     def run(
         self,
@@ -310,6 +318,14 @@ class BatchRunner:
             if on_ticker_done:
                 on_ticker_done(result)
         return batch
+```
+
+Update `tradingagents/batch/__init__.py` to export `BatchRunner`:
+
+```python
+from tradingagents.batch.runner import BatchRunner, TickerResult, BatchResult
+
+__all__ = ["BatchRunner", "TickerResult", "BatchResult"]
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -371,7 +387,7 @@ def _make_state(ticker, rating):
 
 
 class TestGenerateSummaryReport:
-    def test_contains_ranking_table(self):
+    def test_contains_ranking_table_with_decision(self):
         batch = BatchResult(
             date="2026-05-04",
             results=[
@@ -380,9 +396,10 @@ class TestGenerateSummaryReport:
             ],
         )
         md = generate_summary_report(batch)
-        assert "| Ticker | Rating |" in md
+        assert "| Ticker | Rating | Decision |" in md
         assert "| AAPL" in md
         assert "| MSFT" in md
+        assert "Full decision for AAPL" in md
 
     def test_contains_date(self):
         batch = BatchResult(date="2026-05-04", results=[])
@@ -449,6 +466,16 @@ if TYPE_CHECKING:
     from tradingagents.batch.runner import BatchResult, TickerResult
 
 
+def _extract_decision_summary(result: TickerResult, max_len: int = 80) -> str:
+    """Extract a short decision summary from final_trade_decision for the table."""
+    decision = result.final_state.get("final_trade_decision", "")
+    lines = [l.strip() for l in decision.splitlines() if l.strip() and not l.strip().lower().startswith("rating")]
+    summary = " ".join(lines)
+    if len(summary) > max_len:
+        summary = summary[:max_len - 3] + "..."
+    return summary or "N/A"
+
+
 def generate_summary_report(batch: BatchResult) -> str:
     lines = [
         f"# Batch Analysis Summary",
@@ -464,10 +491,11 @@ def generate_summary_report(batch: BatchResult) -> str:
         ranked_ok = [r for r in ranked if r.error is None]
         lines.append("## Rankings")
         lines.append("")
-        lines.append("| Ticker | Rating |")
-        lines.append("|--------|--------|")
+        lines.append("| Ticker | Rating | Decision |")
+        lines.append("|--------|--------|----------|")
         for r in ranked_ok:
-            lines.append(f"| {r.ticker} | {r.rating} |")
+            decision = _extract_decision_summary(r)
+            lines.append(f"| {r.ticker} | {r.rating} | {decision} |")
         lines.append("")
 
     failed = batch.failed()
@@ -629,6 +657,21 @@ class TestBatchRunnerSavesReports:
         runner = BatchRunner(graph=graph, config={})
         result = runner.run(["AAPL"], "2026-05-04")
         assert len(list(tmp_path.iterdir())) == 0
+
+    def test_unsafe_ticker_skipped_in_save(self, tmp_path):
+        graph = MagicMock()
+        graph.propagate.side_effect = [
+            (_make_state("AAPL", "Buy"), "Buy"),
+            (_make_state("../evil", "Hold"), "Hold"),
+        ]
+        config = {"batch_save_dir": str(tmp_path)}
+        runner = BatchRunner(graph=graph, config=config)
+        result = runner.run(["AAPL", "../evil"], "2026-05-04")
+        assert (tmp_path / "2026-05-04" / "AAPL.md").exists()
+        assert (tmp_path / "2026-05-04" / "summary.md").exists()
+        saved_files = [f.name for f in (tmp_path / "2026-05-04").iterdir()]
+        assert "evil.md" not in saved_files
+        assert "..evil.md" not in saved_files
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -665,7 +708,11 @@ class BatchRunner:
             generate_summary_report(batch), encoding="utf-8"
         )
         for result in batch.results:
-            safe = safe_ticker_component(result.ticker)
+            try:
+                safe = safe_ticker_component(result.ticker)
+            except ValueError:
+                logger.warning("Skipping report save for unsafe ticker: %s", result.ticker)
+                continue
             (out / f"{safe}.md").write_text(
                 generate_ticker_report(result), encoding="utf-8"
             )
@@ -674,7 +721,7 @@ class BatchRunner:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd /Users/geoffmiles/claude/repos/projects/TradingAgents && .venv/bin/python -m pytest tests/unit/test_batch_save.py -v`
-Expected: All 3 tests PASS
+Expected: All 4 tests PASS
 
 - [ ] **Step 5: Run all batch tests together**
 
@@ -733,7 +780,7 @@ def _make_state(ticker, rating):
 
 
 class TestBatchCLI:
-    @patch("cli.main.TradingAgentsGraph")
+    @patch("tradingagents.batch.runner.TradingAgentsGraph")
     def test_batch_command_exists(self, mock_graph_cls):
         mock_graph = MagicMock()
         mock_graph.propagate.return_value = (
@@ -748,12 +795,20 @@ class TestBatchCLI:
         ])
         assert result.exit_code == 0, result.output
 
-    @patch("cli.main.TradingAgentsGraph")
-    def test_batch_requires_tickers(self, mock_graph_cls):
+    def test_batch_requires_tickers(self):
         result = runner.invoke(app, ["batch", "--date", "2026-05-04"])
         assert result.exit_code != 0
 
-    @patch("cli.main.TradingAgentsGraph")
+    def test_batch_rejects_invalid_date(self):
+        result = runner.invoke(app, [
+            "batch",
+            "--tickers", "AAPL",
+            "--date", "not-a-date",
+        ])
+        assert result.exit_code != 0
+        assert "Invalid date" in result.output
+
+    @patch("tradingagents.batch.runner.TradingAgentsGraph")
     def test_batch_output_contains_table(self, mock_graph_cls):
         mock_graph = MagicMock()
         mock_graph.propagate.side_effect = [
@@ -795,6 +850,12 @@ def batch(
     """Run batch analysis across multiple tickers."""
     from tradingagents.batch import BatchRunner
 
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        console.print(f"[red]Invalid date format: {date}. Expected YYYY-MM-DD.[/red]")
+        raise typer.Exit(1)
+
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     if not ticker_list:
         console.print("[red]No valid tickers provided.[/red]")
@@ -818,8 +879,6 @@ def batch(
         )
     )
 
-    graph = TradingAgentsGraph(config=config)
-
     def on_start(ticker, idx, total):
         console.print(f"\n[bold cyan][{idx + 1}/{total}][/bold cyan] Analyzing {ticker}...")
 
@@ -829,17 +888,20 @@ def batch(
         else:
             console.print(f"  [green]Rating:[/green] {result.rating}")
 
-    runner = BatchRunner(graph=graph, config=config)
+    runner = BatchRunner(config=config)
     results = runner.run(
         ticker_list, date,
         on_ticker_start=on_start,
         on_ticker_done=on_done,
     )
 
+    from tradingagents.batch.report import _extract_decision_summary
+
     console.print("\n")
     table = Table(title="Batch Results", box=box.ROUNDED)
     table.add_column("Ticker", style="bold")
     table.add_column("Rating")
+    table.add_column("Decision")
     table.add_column("Status")
 
     for r in results.ranked():
@@ -849,7 +911,8 @@ def batch(
             "Underweight": "red", "Sell": "red",
         }.get(r.rating, "white")
         status = f"[red]{r.error}[/red]" if r.error else "[green]OK[/green]"
-        table.add_row(r.ticker, f"[{rating_color}]{r.rating}[/{rating_color}]", status)
+        decision = _extract_decision_summary(r, max_len=60) if not r.error else "N/A"
+        table.add_row(r.ticker, f"[{rating_color}]{r.rating}[/{rating_color}]", decision, status)
 
     console.print(table)
 
@@ -861,7 +924,7 @@ def batch(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd /Users/geoffmiles/claude/repos/projects/TradingAgents && .venv/bin/python -m pytest tests/unit/test_batch_cli.py -v`
-Expected: All 3 tests PASS
+Expected: All 4 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -973,7 +1036,7 @@ Expected: All 2 tests PASS
 
 - [ ] **Step 3: Run the full test suite to check for regressions**
 
-Run: `cd /Users/geoffmiles/claude/repos/projects/TradingAgents && .venv/bin/python -m pytest tests/ -v --timeout=30`
+Run: `cd /Users/geoffmiles/claude/repos/projects/TradingAgents && .venv/bin/python -m pytest tests/ -v`
 Expected: All tests PASS (no regressions in existing tests)
 
 - [ ] **Step 4: Commit**
