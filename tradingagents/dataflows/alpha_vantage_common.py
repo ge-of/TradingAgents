@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 from io import StringIO
 
+from .exceptions import ProviderRateLimitError
+
 API_BASE_URL = "https://www.alphavantage.co/query"
 
 def get_api_key() -> str:
@@ -35,9 +37,11 @@ def format_datetime_for_api(date_input) -> str:
     else:
         raise ValueError(f"Date must be string or datetime object, got {type(date_input)}")
 
-class AlphaVantageRateLimitError(Exception):
+class AlphaVantageRateLimitError(ProviderRateLimitError):
     """Exception raised when Alpha Vantage API rate limit is exceeded."""
-    pass
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, provider="alpha_vantage")
 
 def _make_api_request(function_name: str, params: dict) -> dict | str:
     """Helper function to make API requests and handle responses.
