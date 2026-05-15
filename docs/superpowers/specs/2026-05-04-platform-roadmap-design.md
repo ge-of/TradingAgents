@@ -2,13 +2,14 @@
 
 ## Overview
 
-Extension of the TradingAgents multi-agent LLM trading framework with four major features: batch multi-ticker analysis, quantitative stock screening, data provider upgrades, and LLM-guided portfolio optimization. The system remains a decision/recommendation engine — no trade execution.
+Extension of the TradingAgents multi-agent LLM trading framework with five major capabilities: batch multi-ticker analysis, quantitative stock screening, structured macro intelligence, data provider upgrades, and LLM-guided portfolio optimization. The system remains a decision/recommendation engine — no trade execution.
 
 ## Build Order
 
 ```
 Phase 1: Batch Mode          → smallest lift, unlocks everything else
 Phase 2: Screener            → quantitative filtering, chains into batch
+Phase 2.5: Macro Intelligence → structured macro data + macro analysis agent
 Phase 3: Data Provider Swap  → IBKR / Massive.com for data quality
 Phase 4: Portfolio Optimizer  → full portfolio management + LLM strategist
 ```
@@ -17,13 +18,13 @@ Each phase is independently shippable.
 
 ## Prerequisite: Data Contract Layer
 
-Before Phase 2 (Screener) and Phase 3 (Data Provider Swap) can work, the data layer needs a structural fix. Today, `route_to_vendor()` returns formatted report strings designed for LLM consumption (e.g., `get_fundamentals` returns a prose paragraph, not a dict with `pe_ratio: 12.5`). The screener needs structured numeric data, and new providers need a stable return contract.
+Before Phase 2 (Screener), Phase 2.5 (Macro Intelligence), and Phase 3 (Data Provider Swap) can work, the data layer needs a structural fix. Today, `route_to_vendor()` returns formatted report strings designed for LLM consumption (e.g., `get_fundamentals` returns a prose paragraph, not a dict with `pe_ratio: 12.5`). The screener needs structured numeric data, macro intelligence needs structured time-series snapshots, and new providers need a stable return contract.
 
 **Fix (built as part of Phase 2):** Add a structured data access layer alongside the existing string-returning tools.
 
 - New module: `tradingagents/dataflows/structured.py`
 - The existing `@tool`-decorated functions and `route_to_vendor()` string outputs remain unchanged — agents continue to receive report strings.
-- The screener, portfolio optimizer, and `_fetch_returns()` (which currently imports yfinance directly at `trading_graph.py:191-221`) all use the structured layer instead.
+- The screener, macro layer, portfolio optimizer, and `_fetch_returns()` (which currently imports yfinance directly at `trading_graph.py:191-221`) all use structured contracts instead.
 - When new data providers are added in Phase 3, they implement the structured contract directly, and the string-formatting layer wraps them for agent consumption.
 
 This is not a separate phase — it's built incrementally as part of Phases 2 and 3.
@@ -299,6 +300,260 @@ The screener is pure quantitative filtering. LLM-driven screening (where a light
 
 ---
 
+## Phase 2.5: Macro Intelligence Layer
+
+### Purpose
+
+Add structured macroeconomic context to TradingAgents before the broader market-data provider swap. Macro intelligence is data-first: raw macro series are normalized into typed snapshots, deterministic regime labels are computed from those snapshots, and only then does an optional Macro Analyst interpret the regime for a specific ticker. The system remains a recommendation engine, not an economic forecasting or trade-execution system.
+
+### Build Slices
+
+```
+Phase 2.5a: Macro Data Contract   → schemas, provider adapters, cache, missing-data semantics
+Phase 2.5b: Macro Regime Snapshot → deterministic date/region regime classification
+Phase 2.5c: Macro Analyst         → per-ticker LangGraph analyst using the shared snapshot
+```
+
+This phase is independently shippable in slices. 2.5a and 2.5b should not require LLM calls. 2.5c adds the LLM-facing analyst node after the data contract is stable.
+
+### Architecture
+
+New module: `tradingagents/macro/`
+
+```
+tradingagents/macro/
+    __init__.py
+    schemas.py          # MacroSeries, MacroIndicatorSnapshot, MacroRegimeSnapshot
+    registry.py         # indicator catalog and provider/source mapping
+    providers/
+        __init__.py
+        fred.py
+        bls.py
+        oecd.py
+        imf.py
+        ecb.py
+        federal_reserve.py
+        eia.py
+        tradingeconomics.py
+        econdb.py
+    regime.py           # raw series -> MacroRegimeSnapshot
+    cache.py            # ~/.tradingagents/cache/macro/
+    report.py           # Markdown rendering for snapshots
+```
+
+The macro module owns structured macro data and deterministic regime construction. Agent tools consume rendered macro snapshot reports; they do not call provider APIs directly.
+
+### Data Contract
+
+```python
+@dataclass
+class MacroObservation:
+    date: str
+    value: Optional[float]
+    is_revised: bool = False
+    is_estimate: bool = False
+
+
+@dataclass
+class MacroSeries:
+    indicator: str
+    provider: str
+    region: str
+    frequency: str
+    units: str
+    observations: List[MacroObservation]
+    as_of: str
+
+
+@dataclass
+class MacroIndicatorSnapshot:
+    indicator: str
+    provider: str
+    region: str
+    as_of: str
+    latest_date: Optional[str]
+    latest_value: Optional[float]
+    previous_value: Optional[float]
+    delta: Optional[float]
+    yoy_delta: Optional[float]
+    trend: str  # rising | falling | flat | unknown
+    stale: bool
+
+
+@dataclass
+class MacroDataAvailability:
+    indicator: str
+    provider: str
+    region: str
+    status: str  # available | missing | stale | provider_error | credential_missing
+    message: str
+
+
+@dataclass
+class MacroRegimeSnapshot:
+    as_of: str
+    region: str
+    inflation_regime: str      # cooling | sticky | accelerating | unknown
+    growth_regime: str         # expanding | slowing | contracting | unknown
+    labor_regime: str          # tight | balanced | weakening | unknown
+    policy_regime: str         # easing | neutral | restrictive | unknown
+    yield_curve_regime: str    # normal | flat | inverted | steepening | unknown
+    liquidity_regime: str      # abundant | tightening | stressed | unknown
+    energy_regime: str         # benign | rising_pressure | shock | unknown
+    risk_flags: List[str]
+    indicator_snapshots: Dict[str, MacroIndicatorSnapshot]
+    unavailable: List[MacroDataAvailability]
+```
+
+All snapshots are date-aware. The `as_of` date is the maximum date the caller is allowed to know, so regime construction must not use later macro observations. Missing or stale data is represented explicitly in `MacroDataAvailability` and in `unknown` regime labels; missing data is not silently ignored.
+
+### Provider/API Strategy
+
+Use OpenBB's macro/economy surface as the reference map for source coverage, but do not add OpenBB as a hard dependency in the first implementation slice. Start with direct, focused adapters and preserve an internal provider-neutral contract.
+
+Initial required adapter:
+- `fred` for US macro series and rates.
+
+Initial optional adapters:
+- `bls` for CPI, unemployment, and labor detail.
+- `eia` for energy inputs.
+
+Later adapters:
+- `oecd`, `imf`, `ecb`, `federal_reserve`, `tradingeconomics`, `econdb`.
+
+Representative indicator families:
+- Inflation: CPI, core CPI, PCE, inflation expectations.
+- Growth: real GDP, industrial production, retail sales, composite leading indicators.
+- Labor: unemployment, nonfarm payrolls, participation, wage growth.
+- Policy/rates: Fed funds, policy rates, Treasury yields, yield curve spreads.
+- Liquidity/financial conditions: money measures, central bank holdings, financial conditions indexes.
+- Energy: oil, natural gas, gasoline, electricity, and energy inventory signals.
+- Events/documents: economic calendar and FOMC documents as contextual inputs.
+
+Config keys:
+
+```python
+"macro_default_region": "US",
+"macro_default_provider_chain": {
+    "inflation": ["fred", "bls"],
+    "growth": ["fred", "oecd", "imf"],
+    "labor": ["fred", "bls"],
+    "policy": ["fred", "federal_reserve", "ecb"],
+    "liquidity": ["fred", "federal_reserve"],
+    "energy": ["eia", "fred"],
+},
+"macro_cache_dir": os.path.join(_TRADINGAGENTS_HOME, "cache", "macro"),
+"macro_snapshot_stale_days": 45,
+```
+
+Provider credential env vars:
+- `FRED_API_KEY`
+- `BLS_API_KEY`
+- `EIA_API_KEY`
+- `TRADINGECONOMICS_API_KEY`
+
+Adapters should normalize transport/auth/rate-limit failures into the shared data-provider error hierarchy planned for Phase 3. A missing credential should produce a `MacroDataAvailability(status="credential_missing")` record when the indicator is optional, and a named error when the requested provider is required.
+
+### Macro Regime Snapshot
+
+`MacroRegimeSnapshot` is the first user-facing product of this phase. It should be deterministic and testable. Regime labels are computed from rolling deltas, year-over-year changes, threshold comparisons, yield-curve spreads, and stale-data checks. No LLM classification is used in 2.5a or 2.5b.
+
+Example usage:
+
+```python
+from tradingagents.macro import build_macro_regime_snapshot
+
+snapshot = build_macro_regime_snapshot(
+    as_of="2026-05-04",
+    region="US",
+    config=config,
+)
+```
+
+The snapshot is shared by:
+- Screener presets that choose different filters in restrictive, inflationary, or recession-risk regimes.
+- Batch reports that include one macro section for the run date.
+- The Macro Analyst node, which turns the shared snapshot into a ticker-specific report.
+- The future portfolio optimizer, which can use regime flags when estimating concentration and risk.
+
+### Macro Analyst
+
+The Macro Analyst is a per-ticker LangGraph analyst node added after the macro snapshot contract exists.
+
+New agent module:
+
+```
+tradingagents/agents/analysts/macro_analyst.py
+```
+
+State and graph changes:
+- Add `macro_report` to `AgentState`.
+- Add a `macro` analyst selector key.
+- Register `create_macro_analyst()` in `tradingagents/agents/__init__.py`.
+- Add `Macro Analyst`, `tools_macro`, and `Msg Clear Macro` in `GraphSetup`.
+- Add `should_continue_macro()` in `ConditionalLogic`.
+- Initialize `macro_report` in `Propagator.create_initial_state()`.
+
+Tool wrapper:
+
+```
+tradingagents/agents/utils/macro_data_tools.py
+```
+
+Initial tool:
+- `get_macro_regime(curr_date, region="US") -> str`
+
+The tool builds or loads a structured snapshot, then returns Markdown from `tradingagents/macro/report.py`. The Macro Analyst prompt interprets the snapshot for the selected ticker/sector: rate sensitivity, inflation sensitivity, growth cyclicality, labor/cost pressure, energy exposure, currency/region exposure, and major macro risks. It does not make final Buy/Sell decisions.
+
+### CLI And Reports
+
+Add macro commands:
+
+```bash
+tradingagents macro snapshot --date 2026-05-04 --region US
+tradingagents macro report --date 2026-05-04 --region US
+```
+
+Add Macro Analyst to the existing interactive analyst selection:
+
+```text
+Market Analyst
+Sentiment Analyst
+News Analyst
+Fundamentals Analyst
+Macro Analyst
+```
+
+Report outputs:
+- Macro snapshots saved under `~/.tradingagents/logs/macro/<region>/<date>/`.
+- Single-ticker saved reports include `1_analysts/macro.md` when selected.
+- Batch summaries can include one shared macro regime section when invoked with macro context.
+
+Batch macro context should be computed once per `(date, region)`, not once per ticker. Per-ticker Macro Analyst runs still happen inside each graph run if the `macro` analyst is selected.
+
+### Testing
+
+- Schema tests for `MacroSeries`, `MacroIndicatorSnapshot`, `MacroDataAvailability`, and `MacroRegimeSnapshot`.
+- Provider adapter tests with mocked HTTP payloads, missing credentials, stale data, and no-data responses.
+- Cache tests for date/region/provider keying and atomic writes.
+- Regime tests for deterministic classification thresholds and no-look-ahead behavior.
+- Tool wrapper tests proving `get_macro_regime()` renders Markdown from a structured snapshot.
+- Graph tests proving `macro_report` propagates through `AgentState`.
+- CLI tests for command registration, date/region validation, and non-interactive output.
+- Batch/report tests proving shared macro context appears once and per-ticker failures remain isolated.
+
+### Files to Create/Modify
+
+- **Create:** `tradingagents/macro/__init__.py`, `schemas.py`, `registry.py`, `regime.py`, `cache.py`, `report.py`
+- **Create:** `tradingagents/macro/providers/__init__.py`, `fred.py`, `bls.py`, `eia.py`
+- **Create:** `tradingagents/agents/analysts/macro_analyst.py`
+- **Create:** `tradingagents/agents/utils/macro_data_tools.py`
+- **Modify:** `tradingagents/agents/utils/agent_states.py`, `tradingagents/graph/setup.py`, `tradingagents/graph/conditional_logic.py`, `tradingagents/graph/propagation.py`
+- **Modify:** `tradingagents/agents/__init__.py`, `cli/models.py`, `cli/utils.py`, `cli/main.py`
+- **Modify:** `tradingagents/batch/report.py`, `tradingagents/default_config.py`, `.env.example`
+
+---
+
 ## Phase 3: Data Provider Swap
 
 ### Purpose
@@ -378,6 +633,7 @@ Agent prompts, graph topology, CLI commands, screener, and batch mode. The swap 
 - **Modify:** `tradingagents/dataflows/interface.py` (register new vendors in `VENDOR_METHODS`, broaden fallback to catch `DataProviderError`)
 - **Modify:** `tradingagents/dataflows/y_finance.py`, `tradingagents/dataflows/alpha_vantage_*.py` (replace error-string returns with `DataProviderError` raises)
 - **Modify:** `tradingagents/graph/trading_graph.py` (route `_fetch_returns()` through structured data layer)
+- **Modify:** `tradingagents/macro/providers/*` as needed to have macro adapters use the same shared provider error hierarchy
 - **Modify:** `.env.example` (add `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MASSIVE_API_KEY`)
 
 ---
@@ -542,7 +798,8 @@ These items are acknowledged but not designed in this spec:
 - **LLM-driven screening** — agent-based filtering where a lightweight LLM evaluates each candidate before full analysis
 - **Parallel analyst execution** — run analysts concurrently within the per-ticker graph using LangGraph fan-out
 - **Backtesting framework** — replay historical decisions against actual outcomes
-- **Additional data providers** — Polygon.io, IEX Cloud, etc. (same pattern as Phase 3)
+- **Additional market data providers** — Polygon.io, IEX Cloud, etc. (same pattern as Phase 3)
+- **OpenBB macro adapter** — optional future adapter if direct macro adapters become too costly or OpenBB provides materially better normalization
 
 ---
 
@@ -552,6 +809,7 @@ These items are acknowledged but not designed in this spec:
 
 - Batch mode: per-ticker fault isolation, errors captured in results
 - Screener: skip tickers with missing data, log warnings
+- Macro: represent missing, stale, or credential-limited indicators explicitly in `MacroDataAvailability`
 - Data providers: broadened fallback chain in `route_to_vendor()` catches `DataProviderError` base class
 - Portfolio: validate positions on load, reject invalid state
 
@@ -560,6 +818,10 @@ These items are acknowledged but not designed in this spec:
 All new features use the existing `DEFAULT_CONFIG` pattern. New config keys:
 - `batch_save_dir` — where batch reports are saved
 - `screener_default_universe` — default universe for screening
+- `macro_default_region` — default region for macro snapshots and analyst context
+- `macro_default_provider_chain` — provider fallback chain per macro indicator family
+- `macro_cache_dir` — where structured macro series and snapshots are cached
+- `macro_snapshot_stale_days` — age threshold for stale macro observations
 - `portfolio_dir` — where portfolio state is persisted
 - `portfolio_optimizer_strategy` — default allocation strategy
 
@@ -568,5 +830,6 @@ All new features use the existing `DEFAULT_CONFIG` pattern. New config keys:
 New pip dependencies:
 - Phase 1: None
 - Phase 2: None
+- Phase 2.5: None for the first FRED/BLS/EIA adapters if implemented with `requests`; optional provider-specific SDKs must be justified per adapter
 - Phase 3: `ib_insync` (IBKR), `requests` (already present, for Massive.com)
 - Phase 4: `scipy` (for mean-variance optimization)
