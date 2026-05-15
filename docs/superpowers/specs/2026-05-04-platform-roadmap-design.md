@@ -2,32 +2,32 @@
 
 ## Overview
 
-Extension of the TradingAgents multi-agent LLM trading framework with five major capabilities: batch multi-ticker analysis, quantitative stock screening, structured macro intelligence, data provider upgrades, and LLM-guided portfolio optimization. The system remains a decision/recommendation engine — no trade execution.
+Extension of the TradingAgents multi-agent LLM trading framework with five major capabilities: batch multi-ticker analysis, data layer modernization, quantitative stock screening, structured macro intelligence, and LLM-guided portfolio optimization. The system remains a decision/recommendation engine — no trade execution.
 
 ## Build Order
 
 ```
 Phase 1: Batch Mode          → smallest lift, unlocks everything else
-Phase 2: Screener            → quantitative filtering, chains into batch
-Phase 2.5: Macro Intelligence → structured macro data + macro analysis agent
-Phase 3: Data Provider Swap  → IBKR / Massive.com for data quality
-Phase 4: Portfolio Optimizer  → full portfolio management + LLM strategist
+Phase 2: Data Layer Foundation → Massive/Polygon first, structured contracts, fallback
+Phase 3: Screener              → quantitative filtering, chains into batch
+Phase 4: Macro Intelligence    → structured macro data + macro analysis agent
+Phase 5: Portfolio Optimizer   → full portfolio management + LLM strategist
 ```
 
 Each phase is independently shippable.
 
-## Prerequisite: Data Contract Layer
+## Phase 2 Foundation: Data Contract Layer
 
-Before Phase 2 (Screener), Phase 2.5 (Macro Intelligence), and Phase 3 (Data Provider Swap) can work, the data layer needs a structural fix. Today, `route_to_vendor()` returns formatted report strings designed for LLM consumption (e.g., `get_fundamentals` returns a prose paragraph, not a dict with `pe_ratio: 12.5`). The screener needs structured numeric data, macro intelligence needs structured time-series snapshots, and new providers need a stable return contract.
+Before Screener, Macro Intelligence, and Portfolio Optimizer work, the data layer needs a structural fix. Today, `route_to_vendor()` returns formatted report strings designed for LLM consumption (e.g., `get_fundamentals` returns a prose paragraph, not a dict with `pe_ratio: 12.5`). The screener needs structured numeric data, macro intelligence needs structured time-series snapshots, and new providers need a stable return contract.
 
-**Fix (built as part of Phase 2):** Add a structured data access layer alongside the existing string-returning tools.
+**Fix (built as Phase 2):** Add a structured data access layer alongside the existing string-returning tools, prove it with a Massive/Polygon adapter first, then build higher-level roadmap features on top of it.
 
 - New module: `tradingagents/dataflows/structured.py`
 - The existing `@tool`-decorated functions and `route_to_vendor()` string outputs remain unchanged — agents continue to receive report strings.
 - The screener, macro layer, portfolio optimizer, and `_fetch_returns()` (which currently imports yfinance directly at `trading_graph.py:191-221`) all use structured contracts instead.
-- When new data providers are added in Phase 3, they implement the structured contract directly, and the string-formatting layer wraps them for agent consumption.
+- New providers implement the structured contract directly, and the string-formatting layer wraps them for agent consumption.
 
-This is not a separate phase — it's built incrementally as part of Phases 2 and 3.
+This is now the next major roadmap phase, not a prerequisite hidden inside the screener or provider-swap work.
 
 ### Concrete Schemas
 
@@ -87,7 +87,7 @@ class IndicatorSeries:
     latest_value: Optional[float]       # most recent value for simple indicators (RSI, etc.)
 ```
 
-**Vendor mapping:** Each provider module implements functions that return these schemas. For the initial yfinance implementation in `structured.py`, this means parsing the text output of existing yfinance functions (e.g., extracting `"P/E Ratio (TTM): 28.5"` → `pe_ratio_trailing: 28.5`). For new providers in Phase 3, they return structured data natively and a separate formatting function wraps it into report strings for `VENDOR_METHODS`.
+**Vendor mapping:** Each provider module implements functions that return these schemas. For the initial yfinance implementation in `structured.py`, this means parsing the text output of existing yfinance functions (e.g., extracting `"P/E Ratio (TTM): 28.5"` → `pe_ratio_trailing: 28.5`). New providers return structured data natively and a separate formatting function wraps it into report strings for `VENDOR_METHODS`.
 
 **Missing data:** All numeric fields are `Optional[float]`. When a provider doesn't have a field, it's `None`. Screener filters skip tickers where the filtered field is `None` (logged as a warning).
 
@@ -174,7 +174,7 @@ for r in results.ranked():
 
 ---
 
-## Phase 2: Stock Screener / Value-Buy Finder
+## Capability Detail: Stock Screener / Value-Buy Finder (Phase 3)
 
 ### Purpose
 
@@ -300,21 +300,21 @@ The screener is pure quantitative filtering. LLM-driven screening (where a light
 
 ---
 
-## Phase 2.5: Macro Intelligence Layer
+## Capability Detail: Macro Intelligence Layer (Phase 4)
 
 ### Purpose
 
-Add structured macroeconomic context to TradingAgents before the broader market-data provider swap. Macro intelligence is data-first: raw macro series are normalized into typed snapshots, deterministic regime labels are computed from those snapshots, and only then does an optional Macro Analyst interpret the regime for a specific ticker. The system remains a recommendation engine, not an economic forecasting or trade-execution system.
+Add structured macroeconomic context to TradingAgents after the data layer foundation is in place. Macro intelligence is data-first: raw macro series are normalized into typed snapshots, deterministic regime labels are computed from those snapshots, and only then does an optional Macro Analyst interpret the regime for a specific ticker. The system remains a recommendation engine, not an economic forecasting or trade-execution system.
 
 ### Build Slices
 
 ```
-Phase 2.5a: Macro Data Contract   → schemas, provider adapters, cache, missing-data semantics
-Phase 2.5b: Macro Regime Snapshot → deterministic date/region regime classification
-Phase 2.5c: Macro Analyst         → per-ticker LangGraph analyst using the shared snapshot
+Phase 4A: Macro Data Contract   → schemas, provider adapters, cache, missing-data semantics
+Phase 4B: Macro Regime Snapshot → deterministic date/region regime classification
+Phase 4C: Macro Analyst         → per-ticker LangGraph analyst using the shared snapshot
 ```
 
-This phase is independently shippable in slices. 2.5a and 2.5b should not require LLM calls. 2.5c adds the LLM-facing analyst node after the data contract is stable.
+This phase is independently shippable in slices. 4A and 4B should not require LLM calls. 4C adds the LLM-facing analyst node after the data contract is stable.
 
 ### Architecture
 
@@ -452,11 +452,11 @@ Provider credential env vars:
 - `EIA_API_KEY`
 - `TRADINGECONOMICS_API_KEY`
 
-Adapters should normalize transport/auth/rate-limit failures into the shared data-provider error hierarchy planned for Phase 3. A missing credential should produce a `MacroDataAvailability(status="credential_missing")` record when the indicator is optional, and a named error when the requested provider is required.
+Adapters should normalize transport/auth/rate-limit failures into the shared data-provider error hierarchy from Phase 2. A missing credential should produce a `MacroDataAvailability(status="credential_missing")` record when the indicator is optional, and a named error when the requested provider is required.
 
 ### Macro Regime Snapshot
 
-`MacroRegimeSnapshot` is the first user-facing product of this phase. It should be deterministic and testable. Regime labels are computed from rolling deltas, year-over-year changes, threshold comparisons, yield-curve spreads, and stale-data checks. No LLM classification is used in 2.5a or 2.5b.
+`MacroRegimeSnapshot` is the first user-facing product of this phase. It should be deterministic and testable. Regime labels are computed from rolling deltas, year-over-year changes, threshold comparisons, yield-curve spreads, and stale-data checks. No LLM classification is used in 4A or 4B.
 
 Example usage:
 
@@ -554,15 +554,15 @@ Batch macro context should be computed once per `(date, region)`, not once per t
 
 ---
 
-## Phase 3: Data Provider Swap
+## Capability Detail: Data Layer Foundation (Phase 2)
 
 ### Purpose
 
-Replace yfinance with higher-quality data sources (IBKR and/or Massive.com) by adding new vendor modules that plug into the existing vendor-routing abstraction.
+Build the structured data foundation first, with Massive/Polygon as the first new provider adapter. This phase proves provider-neutral structured price/fundamental contracts, provider error semantics, routing, fallback, and internal adoption before screener, macro, or portfolio work depends on the data layer.
 
 ### Architecture
 
-The existing data layer already supports this pattern. `route_to_vendor()` in `tradingagents/dataflows/interface.py` dispatches tool calls to vendor implementations based on config. Adding a new provider requires:
+The existing data layer already supports part of this pattern. `route_to_vendor()` in `tradingagents/dataflows/interface.py` dispatches tool calls to vendor implementations based on config. Phase 2 extends that pattern with structured data contracts and a concrete Massive/Polygon adapter. Adding a new provider requires:
 
 1. New module implementing the vendor functions
 2. Registration in `VENDOR_METHODS`
@@ -570,21 +570,23 @@ The existing data layer already supports this pattern. `route_to_vendor()` in `t
 
 ### New Modules
 
+**`tradingagents/dataflows/massive.py`**
+
+- Implements: `get_massive_stock()`, `get_massive_indicators()`, `get_massive_fundamentals()`, `get_massive_news()`, etc.
+- Each function implements the structured data contract (returns `FundamentalsSnapshot`, `PriceHistory`, etc. as defined in `structured.py`).
+- Separate string-formatting wrappers (e.g., `get_massive_stock_report()`) convert structured output to report strings and are registered in `VENDOR_METHODS` for agent consumption via `route_to_vendor()`.
+- The structured functions themselves (e.g., `get_massive_stock_structured()`) are called directly by the screener and portfolio optimizer, not through `VENDOR_METHODS`.
+- REST API with API key auth and stateless HTTP calls.
+- Key from env var: `MASSIVE_API_KEY`.
+- The adapter should use Massive naming in new code. `polygon` may be accepted as a legacy alias only where useful for backwards compatibility.
+
 **`tradingagents/dataflows/ibkr.py`**
 
-- Implements: `get_ibkr_stock()`, `get_ibkr_indicators()`, `get_ibkr_fundamentals()`, `get_ibkr_news()`, etc.
-- Each function implements the structured data contract (returns `FundamentalsSnapshot`, `PriceHistory`, etc. as defined in `structured.py`).
-- Separate string-formatting wrappers (e.g., `get_ibkr_stock_report()`) convert structured output to report strings and are registered in `VENDOR_METHODS` for agent consumption via `route_to_vendor()`.
-- The structured functions themselves (e.g., `get_ibkr_stock_structured()`) are called directly by the screener and portfolio optimizer, not through `VENDOR_METHODS`.
+- Later Phase 2 slice after Massive proves the structured adapter path.
+- Implements the same structured function signatures.
 - Connection via `ib_insync` library. Requires IB Gateway or TWS running locally.
 - Module-level connection manager (singleton) handles session lifecycle: connect on first data request, reuse across calls, disconnect on teardown.
 - Connection params from env vars: `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`.
-
-**`tradingagents/dataflows/massive.py`**
-
-- Implements the same function signatures.
-- REST API with API key auth — stateless HTTP calls.
-- Key from env var: `MASSIVE_API_KEY`.
 
 ### Registration
 
@@ -602,9 +604,9 @@ The existing data layer already supports this pattern. `route_to_vendor()` in `t
 
 ```python
 config["data_vendors"] = {
-    "core_stock_apis": "ibkr",
-    "technical_indicators": "ibkr",
-    "fundamental_data": "ibkr",
+    "core_stock_apis": "massive",
+    "technical_indicators": "massive",
+    "fundamental_data": "massive",
     "news_data": "massive",  # can mix providers per category
 }
 ```
@@ -617,7 +619,7 @@ The existing fallback logic in `route_to_vendor()` only catches `AlphaVantageRat
 - Each provider wraps its connection/HTTP/auth errors into `DataProviderError` subclasses.
 - `route_to_vendor()` catches `DataProviderError` (not just the Alpha Vantage variant) to trigger fallback.
 - Provider-specific errors (IBKR disconnect, Massive HTTP 5xx, yfinance rate limit) all inherit from `DataProviderError`.
-- **Existing providers must also be updated:** yfinance and Alpha Vantage functions currently catch broad exceptions and return `"Error ..."` strings (e.g., `y_finance.py:301`, `alpha_vantage_indicator.py:220`). These must be changed to raise `DataProviderError` on provider/network/auth failures, reserving return values for successful data or explicit no-data results. This is in scope for Phase 3.
+- **Existing providers must also be updated:** yfinance and Alpha Vantage functions currently catch broad exceptions and return `"Error ..."` strings (e.g., `y_finance.py:301`, `alpha_vantage_indicator.py:220`). These must be changed to raise `DataProviderError` on provider/network/auth failures, reserving return values for successful data or explicit no-data results. This is in scope for Phase 2.
 
 ### Direct yfinance Usage
 
@@ -629,16 +631,17 @@ Agent prompts, graph topology, CLI commands, screener, and batch mode. The swap 
 
 ### Files to Create/Modify
 
-- **Create:** `tradingagents/dataflows/ibkr.py`, `tradingagents/dataflows/massive.py`, `tradingagents/dataflows/exceptions.py`
+- **Create:** `tradingagents/dataflows/massive.py`, `tradingagents/dataflows/exceptions.py`
+- **Later create:** `tradingagents/dataflows/ibkr.py`
 - **Modify:** `tradingagents/dataflows/interface.py` (register new vendors in `VENDOR_METHODS`, broaden fallback to catch `DataProviderError`)
 - **Modify:** `tradingagents/dataflows/y_finance.py`, `tradingagents/dataflows/alpha_vantage_*.py` (replace error-string returns with `DataProviderError` raises)
 - **Modify:** `tradingagents/graph/trading_graph.py` (route `_fetch_returns()` through structured data layer)
 - **Modify:** `tradingagents/macro/providers/*` as needed to have macro adapters use the same shared provider error hierarchy
-- **Modify:** `.env.example` (add `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MASSIVE_API_KEY`)
+- **Modify:** `.env.example` (add `MASSIVE_API_KEY`; later add `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`)
 
 ---
 
-## Phase 4: Portfolio Optimizer
+## Capability Detail: Portfolio Optimizer (Phase 5)
 
 ### Purpose
 
@@ -658,7 +661,7 @@ tradingagents/portfolio/
     schemas.py         # Pydantic models for strategy decisions
 ```
 
-### 4a. Portfolio State & Persistence
+### 5A. Portfolio State & Persistence
 
 **Portfolio class** tracks:
 - Holdings: list of `Position(ticker, shares, avg_cost_basis, current_value)`
@@ -677,7 +680,7 @@ portfolio.add_position("MSFT", shares=30, cost_basis=420.00)
 portfolio.save()
 ```
 
-### 4b. Quantitative Allocation Engine
+### 5B. Quantitative Allocation Engine
 
 **Optimizer** takes batch analysis results plus current portfolio state, produces target allocations.
 
@@ -705,7 +708,7 @@ class RebalanceProposal:
     expected_portfolio_metrics: Dict  # total value, diversification ratio, etc.
 ```
 
-### 4c. LLM Portfolio Strategist Agent
+### 5C. LLM Portfolio Strategist Agent
 
 **Post-pipeline agent** — runs after batch analysis completes, not inside the per-ticker graph. This is intentionally separate from the existing per-ticker "Portfolio Manager" graph node, which makes a Buy/Hold/Sell decision for a single ticker. The Portfolio Strategist reasons across all tickers simultaneously about allocation, concentration risk, and correlation — a fundamentally different scope.
 
@@ -798,7 +801,8 @@ These items are acknowledged but not designed in this spec:
 - **LLM-driven screening** — agent-based filtering where a lightweight LLM evaluates each candidate before full analysis
 - **Parallel analyst execution** — run analysts concurrently within the per-ticker graph using LangGraph fan-out
 - **Backtesting framework** — replay historical decisions against actual outcomes
-- **Additional market data providers** — Polygon.io, IEX Cloud, etc. (same pattern as Phase 3)
+- **Additional market data providers** — IEX Cloud, etc. (same pattern as Phase 2)
+- **Polygon legacy alias** — optional compatibility alias for the Massive adapter if users still refer to Polygon.io
 - **OpenBB macro adapter** — optional future adapter if direct macro adapters become too costly or OpenBB provides materially better normalization
 
 ---
@@ -829,7 +833,7 @@ All new features use the existing `DEFAULT_CONFIG` pattern. New config keys:
 
 New pip dependencies:
 - Phase 1: None
-- Phase 2: None
-- Phase 2.5: None for the first FRED/BLS/EIA adapters if implemented with `requests`; optional provider-specific SDKs must be justified per adapter
-- Phase 3: `ib_insync` (IBKR), `requests` (already present, for Massive.com)
-- Phase 4: `scipy` (for mean-variance optimization)
+- Phase 2: `requests` already present for Massive.com; `ib_insync` only when the later IBKR slice starts
+- Phase 3: None
+- Phase 4: None for the first FRED/BLS/EIA adapters if implemented with `requests`; optional provider-specific SDKs must be justified per adapter
+- Phase 5: `scipy` (for mean-variance optimization)

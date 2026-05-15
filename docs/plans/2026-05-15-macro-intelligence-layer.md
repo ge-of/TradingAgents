@@ -1,17 +1,18 @@
 ---
 initiative: trading-platform
-phase: 2.5
+phase: 4
 status: planned
 worktree: main
 depends_on:
   - docs/superpowers/specs/2026-05-04-platform-roadmap-design.md
+  - Phase 2 Data Layer Foundation
 ---
 
 # Macro Intelligence Layer Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a data-first macro intelligence layer that produces deterministic macro regime snapshots and then exposes them to TradingAgents through CLI commands and a selectable per-ticker Macro Analyst.
+**Goal:** Build a data-first macro intelligence layer, after the Phase 2 data layer foundation, that produces deterministic macro regime snapshots and then exposes them to TradingAgents through CLI commands and a selectable per-ticker Macro Analyst.
 
 **Architecture:** Add a focused `tradingagents/macro/` package for structured macro series, provider adapters, caching, regime classification, and Markdown rendering. Keep provider APIs below the macro contract; the Macro Analyst consumes rendered snapshots through tool wrappers and writes `macro_report` into the existing per-ticker LangGraph state.
 
@@ -2108,7 +2109,7 @@ Expected: clean except unrelated pre-existing local files such as `.DS_Store`.
 
 ## Execution Notes
 
-- Keep 2.5a and 2.5b deterministic. No LLM calls belong in schema, provider, cache, or regime tests.
+- Keep the macro data-contract and regime-snapshot slices deterministic. No LLM calls belong in schema, provider, cache, or regime tests.
 - Do not make the Macro Analyst fetch provider APIs directly. It must call `get_macro_regime()`, which renders a structured snapshot.
 - Do not add OpenBB as a dependency in this implementation. The source list is OpenBB-inspired, but this plan starts with focused direct adapters.
 - Preserve the recommendation-engine boundary. Macro reports inform decisions; they do not place trades or claim forecast certainty.
