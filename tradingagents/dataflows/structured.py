@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 import pandas as pd
 
+from .config import get_config
+from .exceptions import DataProviderError
+
 
 PRICE_HISTORY_COLUMNS = ("Date", "Open", "High", "Low", "Close", "Volume")
+
+StructuredProvider = Callable[..., Any]
+
+STRUCTURED_METHOD_CATEGORIES = {
+    "get_price_history": "core_stock_apis",
+    "get_fundamentals_snapshot": "fundamental_data",
+    "get_indicator_series": "technical_indicators",
+}
+
+STRUCTURED_VENDOR_METHODS: dict[str, dict[str, StructuredProvider]] = {
+    "get_price_history": {},
+    "get_fundamentals_snapshot": {},
+    "get_indicator_series": {},
+}
 
 
 class AvailabilityStatus(str, Enum):
@@ -85,6 +104,70 @@ class IndicatorSeries:
     availability: list[DataAvailability] = field(default_factory=list)
 
 
+def _get_structured_vendor_config(method: str) -> str:
+    if method not in STRUCTURED_METHOD_CATEGORIES:
+        raise ValueError(f"Structured method '{method}' not supported")
+
+    config = get_config()
+    tool_vendors = config.get("tool_vendors", {})
+    if method in tool_vendors:
+        return tool_vendors[method]
+
+    category = STRUCTURED_METHOD_CATEGORIES[method]
+    return config.get("data_vendors", {}).get(category, "default")
+
+
+def _build_structured_fallback_chain(method: str) -> list[str]:
+    vendor_config = _get_structured_vendor_config(method)
+    configured_vendors = [vendor.strip() for vendor in vendor_config.split(",") if vendor.strip()]
+    available_vendors = list(STRUCTURED_VENDOR_METHODS[method].keys())
+
+    fallback_chain = configured_vendors.copy()
+    for vendor in available_vendors:
+        if vendor not in fallback_chain:
+            fallback_chain.append(vendor)
+
+    return fallback_chain
+
+
+def route_structured_method(method: str, *args: Any, **kwargs: Any) -> Any:
+    """Route a structured data request to the configured structured provider."""
+    if method not in STRUCTURED_VENDOR_METHODS:
+        raise ValueError(f"Structured method '{method}' not supported")
+
+    for vendor in _build_structured_fallback_chain(method):
+        provider_impl = STRUCTURED_VENDOR_METHODS[method].get(vendor)
+        if provider_impl is None:
+            continue
+
+        try:
+            return provider_impl(*args, **kwargs)
+        except DataProviderError:
+            continue
+
+    raise RuntimeError(f"No available structured provider for '{method}'")
+
+
+def get_price_history(ticker: str, start: str, end: str) -> PriceHistory:
+    """Return structured OHLCV history from the configured structured provider."""
+    return route_structured_method("get_price_history", ticker, start, end)
+
+
+def get_fundamentals_snapshot(ticker: str, as_of: str) -> FundamentalsSnapshot:
+    """Return structured fundamentals from the configured structured provider."""
+    return route_structured_method("get_fundamentals_snapshot", ticker, as_of)
+
+
+def get_indicator_series(
+    ticker: str,
+    indicator: str,
+    as_of: str,
+    window: int,
+) -> IndicatorSeries:
+    """Return structured technical indicators from the configured structured provider."""
+    return route_structured_method("get_indicator_series", ticker, indicator, as_of, window)
+
+
 __all__ = [
     "AvailabilityStatus",
     "DataAvailability",
@@ -92,4 +175,10 @@ __all__ = [
     "IndicatorSeries",
     "PRICE_HISTORY_COLUMNS",
     "PriceHistory",
+    "STRUCTURED_METHOD_CATEGORIES",
+    "STRUCTURED_VENDOR_METHODS",
+    "get_fundamentals_snapshot",
+    "get_indicator_series",
+    "get_price_history",
+    "route_structured_method",
 ]
