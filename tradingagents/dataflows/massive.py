@@ -13,7 +13,7 @@ from .availability import ProviderResultRole, normalize_provider_result
 from .exceptions import ProviderAuthError, ProviderRateLimitError, ProviderUnavailableError
 
 if TYPE_CHECKING:
-    from .structured import PriceHistory
+    from .structured import PriceHistory, TickerDetails
 
 MASSIVE_PROVIDER = "massive"
 MASSIVE_LEGACY_PROVIDER_ALIASES = {"polygon": MASSIVE_PROVIDER}
@@ -41,6 +41,10 @@ def get_massive_api_key() -> str:
 
 def _daily_aggs_url(ticker: str, start: str, end: str) -> str:
     return f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker.upper()}/range/1/day/{start}/{end}"
+
+
+def _ticker_details_url(ticker: str) -> str:
+    return f"{MASSIVE_BASE_URL}/v3/reference/tickers/{ticker.upper()}"
 
 
 def _timestamp_ms_to_date(value: int | float) -> str:
@@ -111,6 +115,74 @@ def _parse_aggregate_rows(payload: dict[str, Any], ticker: str, start: str, end:
     return pd.DataFrame(records, columns=PRICE_HISTORY_COLUMNS)
 
 
+def _is_missing_reference_field(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _missing_ticker_detail_availability(field: str):
+    from .structured import AvailabilityStatus, DataAvailability
+
+    return DataAvailability(
+        field=field,
+        status=AvailabilityStatus.MISSING,
+        message=f"Massive response did not include {field}",
+        provider=MASSIVE_PROVIDER,
+    )
+
+
+def _parse_ticker_details(payload: dict[str, Any], ticker: str, as_of: str) -> TickerDetails:
+    from .structured import TickerDetails
+
+    if not isinstance(payload, dict):
+        raise ProviderUnavailableError(
+            "Massive get_ticker_details response was malformed",
+            provider=MASSIVE_PROVIDER,
+            method="get_ticker_details",
+        )
+
+    raw_details = normalize_provider_result(
+        payload.get("results"),
+        provider=MASSIVE_PROVIDER,
+        method="get_ticker_details",
+        role=ProviderResultRole.REQUIRED,
+        no_data_message=f"No Massive ticker details found for {ticker.upper()} as of {as_of}",
+        details={"ticker": ticker.upper(), "as_of": as_of},
+    )
+    if not isinstance(raw_details, dict):
+        raise ProviderUnavailableError(
+            "Massive get_ticker_details response was malformed",
+            provider=MASSIVE_PROVIDER,
+            method="get_ticker_details",
+        )
+
+    fields = {
+        "name": raw_details.get("name"),
+        "market": raw_details.get("market"),
+        "exchange": raw_details.get("primary_exchange"),
+        "currency": raw_details.get("currency_name"),
+        "locale": raw_details.get("locale"),
+        "active": raw_details.get("active"),
+    }
+    availability = [
+        _missing_ticker_detail_availability(field)
+        for field, value in fields.items()
+        if _is_missing_reference_field(value)
+    ]
+    result_ticker = raw_details.get("ticker") or ticker
+
+    return TickerDetails(
+        ticker=str(result_ticker).upper(),
+        as_of=as_of,
+        name=fields["name"],
+        market=fields["market"],
+        exchange=fields["exchange"],
+        currency=fields["currency"],
+        locale=fields["locale"],
+        active=fields["active"],
+        availability=availability,
+    )
+
+
 def get_massive_price_history(
     ticker: str,
     start: str,
@@ -152,3 +224,42 @@ def get_massive_price_history(
         ) from exc
     data = _parse_aggregate_rows(payload, ticker, start, end)
     return PriceHistory(ticker=ticker.upper(), start=start, end=end, data=data)
+
+
+def get_massive_ticker_details(
+    ticker: str,
+    as_of: str,
+    *,
+    session: requests.Session | None = None,
+) -> TickerDetails:
+    api_key = get_massive_api_key()
+    client = session or requests.Session()
+    try:
+        response = client.get(
+            _ticker_details_url(ticker),
+            params={"date": as_of, "apiKey": api_key},
+            timeout=MASSIVE_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout as exc:
+        raise ProviderUnavailableError(
+            "Massive get_ticker_details request timed out",
+            provider=MASSIVE_PROVIDER,
+            method="get_ticker_details",
+        ) from exc
+    except requests.RequestException as exc:
+        raise ProviderUnavailableError(
+            "Massive get_ticker_details request failed",
+            provider=MASSIVE_PROVIDER,
+            method="get_ticker_details",
+        ) from exc
+
+    _raise_for_massive_status(response, "get_ticker_details")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ProviderUnavailableError(
+            "Massive get_ticker_details response was not valid JSON",
+            provider=MASSIVE_PROVIDER,
+            method="get_ticker_details",
+        ) from exc
+    return _parse_ticker_details(payload, ticker, as_of)
