@@ -1,0 +1,11 @@
+{
+  "results": {
+    "ticker": "AAPL",
+    "name": "Apple Inc.",
+    "market": "stocks",
+    "primary_exchange": "XNAS",
+    "currency_name": "usd",
+    "locale": "us",
+    "active": true
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "results": [
+    {
+      "ticker": "AAPL",
+      "execution_date": "2026-05-12",
+      "split_from": 1,
+      "split_to": 4
+    }
+  ]
+}
