@@ -158,6 +158,8 @@ Massive is optional and remains opt-in through data vendor configuration; `polyg
 
 Massive historical price history uses adjusted daily bars by default. Dividends and splits are exposed separately through structured corporate-action data so future workflows can explicitly choose adjusted or unadjusted semantics.
 
+Massive provider errors are normalized before fallback: HTTP 401/403 indicate missing, invalid, or unauthorized `MASSIVE_API_KEY`; HTTP 429 indicates provider rate limits or quota; HTTP 5xx, timeouts, and malformed responses are treated as provider-unavailable errors. Error diagnostics do not include the API key.
+
 The Massive adapter is covered by mocked tests by default. A real provider smoke check is optional and should only be run when `MASSIVE_API_KEY` is set; the dedicated smoke test is introduced in Slice 2C-S7.
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.

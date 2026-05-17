@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import os
 from typing import TYPE_CHECKING, Any
@@ -39,48 +40,57 @@ def get_massive_api_key() -> str:
     )
 
 
-def _daily_aggs_url(ticker: str, start: str, end: str) -> str:
-    return f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker.upper()}/range/1/day/{start}/{end}"
+def _safe_massive_details(
+    path: str,
+    params: Mapping[str, object],
+    extra: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    safe_params = {key: value for key, value in params.items() if key != "apiKey"}
+    details: dict[str, object] = {"path": path, **safe_params}
+    if extra:
+        details.update(extra)
+    return details
 
 
-def _ticker_details_url(ticker: str) -> str:
-    return f"{MASSIVE_BASE_URL}/v3/reference/tickers/{ticker.upper()}"
+def _massive_url(path: str) -> str:
+    return f"{MASSIVE_BASE_URL}{path}"
 
 
-def _dividends_url() -> str:
-    return f"{MASSIVE_BASE_URL}/v3/reference/dividends"
-
-
-def _splits_url() -> str:
-    return f"{MASSIVE_BASE_URL}/v3/reference/splits"
-
-
-def _timestamp_ms_to_date(value: int | float) -> str:
-    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
-
-
-def _raise_for_massive_status(response: requests.Response, method: str) -> None:
+def _raise_massive_status_error(
+    response: requests.Response,
+    *,
+    path: str,
+    params: Mapping[str, object],
+    method: str,
+) -> None:
     status_code = response.status_code
     if status_code == 200:
         return
 
+    details = _safe_massive_details(path, params, {"status_code": status_code})
     if status_code in {401, 403}:
         raise ProviderAuthError(
-            f"Massive {method} request failed with HTTP {status_code}",
+            f"Massive {method} request was rejected with HTTP {status_code}",
             provider=MASSIVE_PROVIDER,
             method=method,
             status_code=status_code,
+            details=details,
         )
 
     if status_code == 429:
         retry_after_header = response.headers.get("Retry-After")
-        retry_after = int(retry_after_header) if retry_after_header and retry_after_header.isdigit() else None
+        retry_after = (
+            int(retry_after_header.strip())
+            if retry_after_header and retry_after_header.strip().isdigit()
+            else None
+        )
         raise ProviderRateLimitError(
-            f"Massive {method} request failed with HTTP {status_code}",
+            "Massive rate limit exceeded",
             provider=MASSIVE_PROVIDER,
             method=method,
             status_code=status_code,
             retry_after=retry_after,
+            details=details,
         )
 
     raise ProviderUnavailableError(
@@ -88,7 +98,64 @@ def _raise_for_massive_status(response: requests.Response, method: str) -> None:
         provider=MASSIVE_PROVIDER,
         method=method,
         status_code=status_code,
+        details=details,
     )
+
+
+def request_massive_json(
+    path: str,
+    params: Mapping[str, object],
+    *,
+    method: str,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    api_key = get_massive_api_key()
+    request_params = {**dict(params), "apiKey": api_key}
+    client = session or requests.Session()
+    try:
+        response = client.get(
+            _massive_url(path),
+            params=request_params,
+            timeout=MASSIVE_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout:
+        raise ProviderUnavailableError(
+            f"Massive {method} request timed out",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+            details=_safe_massive_details(path, request_params),
+        ) from None
+    except requests.RequestException:
+        raise ProviderUnavailableError(
+            f"Massive {method} request failed",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+            details=_safe_massive_details(path, request_params),
+        ) from None
+
+    _raise_massive_status_error(response, path=path, params=request_params, method=method)
+    try:
+        payload = response.json()
+    except ValueError:
+        raise ProviderUnavailableError(
+            f"Massive {method} response was not valid JSON",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+            details=_safe_massive_details(path, request_params),
+        ) from None
+
+    if not isinstance(payload, dict):
+        raise ProviderUnavailableError(
+            f"Massive {method} response JSON was not an object",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+            details=_safe_massive_details(path, request_params),
+        )
+    return payload
+
+
+def _timestamp_ms_to_date(value: int | float) -> str:
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
 
 
 def _parse_aggregate_rows(payload: dict[str, Any], ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -206,39 +273,13 @@ def _malformed_corporate_actions_error() -> ProviderUnavailableError:
 
 
 def _get_optional_massive_results(
-    client: requests.Session,
-    url: str,
+    path: str,
     params: dict[str, Any],
     method: str,
+    *,
+    session: requests.Session | None = None,
 ) -> list[dict[str, Any]]:
-    try:
-        response = client.get(url, params=params, timeout=MASSIVE_TIMEOUT_SECONDS)
-    except requests.Timeout as exc:
-        raise ProviderUnavailableError(
-            f"Massive {method} request timed out",
-            provider=MASSIVE_PROVIDER,
-            method=method,
-        ) from exc
-    except requests.RequestException as exc:
-        raise ProviderUnavailableError(
-            f"Massive {method} request failed",
-            provider=MASSIVE_PROVIDER,
-            method=method,
-        ) from exc
-
-    _raise_for_massive_status(response, method)
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ProviderUnavailableError(
-            f"Massive {method} response was not valid JSON",
-            provider=MASSIVE_PROVIDER,
-            method=method,
-        ) from exc
-
-    if not isinstance(payload, dict):
-        raise _malformed_corporate_actions_error()
-
+    payload = request_massive_json(path, params, method=method, session=session)
     rows = normalize_provider_result(
         payload.get("results", []),
         provider=MASSIVE_PROVIDER,
@@ -292,36 +333,12 @@ def get_massive_price_history(
 ) -> PriceHistory:
     from .structured import PriceHistory
 
-    api_key = get_massive_api_key()
-    client = session or requests.Session()
-    try:
-        response = client.get(
-            _daily_aggs_url(ticker, start, end),
-            params={"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key},
-            timeout=MASSIVE_TIMEOUT_SECONDS,
-        )
-    except requests.Timeout as exc:
-        raise ProviderUnavailableError(
-            "Massive get_price_history request timed out",
-            provider=MASSIVE_PROVIDER,
-            method="get_price_history",
-        ) from exc
-    except requests.RequestException as exc:
-        raise ProviderUnavailableError(
-            "Massive get_price_history request failed",
-            provider=MASSIVE_PROVIDER,
-            method="get_price_history",
-        ) from exc
-
-    _raise_for_massive_status(response, "get_price_history")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ProviderUnavailableError(
-            "Massive get_price_history response was not valid JSON",
-            provider=MASSIVE_PROVIDER,
-            method="get_price_history",
-        ) from exc
+    payload = request_massive_json(
+        f"/v2/aggs/ticker/{ticker.upper()}/range/1/day/{start}/{end}",
+        {"adjusted": "true", "sort": "asc", "limit": 50000},
+        method="get_price_history",
+        session=session,
+    )
     data = _parse_aggregate_rows(payload, ticker, start, end)
     return PriceHistory(ticker=ticker.upper(), start=start, end=end, data=data)
 
@@ -332,36 +349,12 @@ def get_massive_ticker_details(
     *,
     session: requests.Session | None = None,
 ) -> TickerDetails:
-    api_key = get_massive_api_key()
-    client = session or requests.Session()
-    try:
-        response = client.get(
-            _ticker_details_url(ticker),
-            params={"date": as_of, "apiKey": api_key},
-            timeout=MASSIVE_TIMEOUT_SECONDS,
-        )
-    except requests.Timeout as exc:
-        raise ProviderUnavailableError(
-            "Massive get_ticker_details request timed out",
-            provider=MASSIVE_PROVIDER,
-            method="get_ticker_details",
-        ) from exc
-    except requests.RequestException as exc:
-        raise ProviderUnavailableError(
-            "Massive get_ticker_details request failed",
-            provider=MASSIVE_PROVIDER,
-            method="get_ticker_details",
-        ) from exc
-
-    _raise_for_massive_status(response, "get_ticker_details")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ProviderUnavailableError(
-            "Massive get_ticker_details response was not valid JSON",
-            provider=MASSIVE_PROVIDER,
-            method="get_ticker_details",
-        ) from exc
+    payload = request_massive_json(
+        f"/v3/reference/tickers/{ticker.upper()}",
+        {"date": as_of},
+        method="get_ticker_details",
+        session=session,
+    )
     return _parse_ticker_details(payload, ticker, as_of)
 
 
@@ -374,30 +367,27 @@ def get_massive_corporate_actions(
 ) -> CorporateActions:
     from .structured import CorporateActions
 
-    api_key = get_massive_api_key()
     client = session or requests.Session()
     normalized_ticker = ticker.upper()
     dividend_rows = _get_optional_massive_results(
-        client,
-        _dividends_url(),
+        "/v3/reference/dividends",
         {
             "ticker": normalized_ticker,
             "ex_dividend_date.gte": start,
             "ex_dividend_date.lte": end,
-            "apiKey": api_key,
         },
         "get_corporate_actions",
+        session=client,
     )
     split_rows = _get_optional_massive_results(
-        client,
-        _splits_url(),
+        "/v3/reference/splits",
         {
             "ticker": normalized_ticker,
             "execution_date.gte": start,
             "execution_date.lte": end,
-            "apiKey": api_key,
         },
         "get_corporate_actions",
+        session=client,
     )
     try:
         dividends = [_parse_dividend(row) for row in dividend_rows]
