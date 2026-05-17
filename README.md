@@ -156,6 +156,8 @@ export MASSIVE_API_KEY=...         # Massive market data
 
 Massive is optional and remains opt-in through data vendor configuration; `polygon` is accepted as a legacy config alias for `massive`.
 
+Massive historical price history uses adjusted daily bars by default. Dividends and splits are exposed separately through structured corporate-action data so future workflows can explicitly choose adjusted or unadjusted semantics.
+
 The Massive adapter is covered by mocked tests by default. A real provider smoke check is optional and should only be run when `MASSIVE_API_KEY` is set; the dedicated smoke test is introduced in Slice 2C-S7.
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.

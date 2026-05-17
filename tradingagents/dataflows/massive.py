@@ -13,7 +13,7 @@ from .availability import ProviderResultRole, normalize_provider_result
 from .exceptions import ProviderAuthError, ProviderRateLimitError, ProviderUnavailableError
 
 if TYPE_CHECKING:
-    from .structured import PriceHistory, TickerDetails
+    from .structured import CorporateActions, DividendEvent, PriceHistory, SplitEvent, TickerDetails
 
 MASSIVE_PROVIDER = "massive"
 MASSIVE_LEGACY_PROVIDER_ALIASES = {"polygon": MASSIVE_PROVIDER}
@@ -45,6 +45,14 @@ def _daily_aggs_url(ticker: str, start: str, end: str) -> str:
 
 def _ticker_details_url(ticker: str) -> str:
     return f"{MASSIVE_BASE_URL}/v3/reference/tickers/{ticker.upper()}"
+
+
+def _dividends_url() -> str:
+    return f"{MASSIVE_BASE_URL}/v3/reference/dividends"
+
+
+def _splits_url() -> str:
+    return f"{MASSIVE_BASE_URL}/v3/reference/splits"
 
 
 def _timestamp_ms_to_date(value: int | float) -> str:
@@ -183,6 +191,98 @@ def _parse_ticker_details(payload: dict[str, Any], ticker: str, as_of: str) -> T
     )
 
 
+def _corporate_action_details(params: dict[str, Any]) -> dict[str, Any]:
+    start = params.get("ex_dividend_date.gte") or params.get("execution_date.gte") or params.get("date.gte")
+    end = params.get("ex_dividend_date.lte") or params.get("execution_date.lte") or params.get("date.lte")
+    return {"ticker": params.get("ticker"), "start": start, "end": end}
+
+
+def _malformed_corporate_actions_error() -> ProviderUnavailableError:
+    return ProviderUnavailableError(
+        "Massive get_corporate_actions response was malformed",
+        provider=MASSIVE_PROVIDER,
+        method="get_corporate_actions",
+    )
+
+
+def _get_optional_massive_results(
+    client: requests.Session,
+    url: str,
+    params: dict[str, Any],
+    method: str,
+) -> list[dict[str, Any]]:
+    try:
+        response = client.get(url, params=params, timeout=MASSIVE_TIMEOUT_SECONDS)
+    except requests.Timeout as exc:
+        raise ProviderUnavailableError(
+            f"Massive {method} request timed out",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+        ) from exc
+    except requests.RequestException as exc:
+        raise ProviderUnavailableError(
+            f"Massive {method} request failed",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+        ) from exc
+
+    _raise_for_massive_status(response, method)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ProviderUnavailableError(
+            f"Massive {method} response was not valid JSON",
+            provider=MASSIVE_PROVIDER,
+            method=method,
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise _malformed_corporate_actions_error()
+
+    rows = normalize_provider_result(
+        payload.get("results", []),
+        provider=MASSIVE_PROVIDER,
+        method=method,
+        role=ProviderResultRole.OPTIONAL,
+        details=_corporate_action_details(params),
+    )
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise _malformed_corporate_actions_error()
+
+    return rows
+
+
+def _parse_dividend(row: dict[str, Any]) -> DividendEvent:
+    from .structured import DividendEvent
+
+    ex_dividend_date = row.get("ex_dividend_date")
+    if not isinstance(ex_dividend_date, str) or not ex_dividend_date.strip():
+        raise _malformed_corporate_actions_error()
+
+    return DividendEvent(
+        ticker=str(row.get("ticker", "")).upper(),
+        ex_dividend_date=ex_dividend_date,
+        pay_date=row.get("pay_date"),
+        cash_amount=float(row["cash_amount"]) if row.get("cash_amount") is not None else None,
+        currency=row.get("currency"),
+    )
+
+
+def _parse_split(row: dict[str, Any]) -> SplitEvent:
+    from .structured import SplitEvent
+
+    execution_date = row.get("execution_date")
+    if not isinstance(execution_date, str) or not execution_date.strip():
+        raise _malformed_corporate_actions_error()
+
+    return SplitEvent(
+        ticker=str(row.get("ticker", "")).upper(),
+        execution_date=execution_date,
+        split_from=float(row.get("split_from")),
+        split_to=float(row.get("split_to")),
+    )
+
+
 def get_massive_price_history(
     ticker: str,
     start: str,
@@ -263,3 +363,52 @@ def get_massive_ticker_details(
             method="get_ticker_details",
         ) from exc
     return _parse_ticker_details(payload, ticker, as_of)
+
+
+def get_massive_corporate_actions(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    session: requests.Session | None = None,
+) -> CorporateActions:
+    from .structured import CorporateActions
+
+    api_key = get_massive_api_key()
+    client = session or requests.Session()
+    normalized_ticker = ticker.upper()
+    dividend_rows = _get_optional_massive_results(
+        client,
+        _dividends_url(),
+        {
+            "ticker": normalized_ticker,
+            "ex_dividend_date.gte": start,
+            "ex_dividend_date.lte": end,
+            "apiKey": api_key,
+        },
+        "get_corporate_actions",
+    )
+    split_rows = _get_optional_massive_results(
+        client,
+        _splits_url(),
+        {
+            "ticker": normalized_ticker,
+            "execution_date.gte": start,
+            "execution_date.lte": end,
+            "apiKey": api_key,
+        },
+        "get_corporate_actions",
+    )
+    try:
+        dividends = [_parse_dividend(row) for row in dividend_rows]
+        splits = [_parse_split(row) for row in split_rows]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _malformed_corporate_actions_error() from exc
+
+    return CorporateActions(
+        ticker=normalized_ticker,
+        start=start,
+        end=end,
+        dividends=dividends,
+        splits=splits,
+    )
