@@ -6,6 +6,7 @@ import requests
 
 import tradingagents.default_config as default_config
 import tradingagents.dataflows.config as config_module
+from massive_fakes import FakeMassiveResponse, FakeMassiveSession, load_massive_fixture
 from tradingagents.dataflows import structured
 from tradingagents.dataflows.exceptions import (
     DataProviderError,
@@ -18,27 +19,6 @@ from tradingagents.dataflows.massive import MASSIVE_API_KEY_ENV, get_massive_pri
 from tradingagents.dataflows.structured import PRICE_HISTORY_COLUMNS, PriceHistory
 
 
-class FakeResponse:
-    def __init__(self, payload, status_code=200, headers=None):
-        self._payload = payload
-        self.status_code = status_code
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
-
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
-        return self.response
-
-
 @pytest.fixture(autouse=True)
 def reset_dataflows_config(monkeypatch):
     monkeypatch.setattr(config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG))
@@ -47,17 +27,7 @@ def reset_dataflows_config(monkeypatch):
 @pytest.mark.unit
 def test_get_massive_price_history_parses_daily_aggregates(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(
-        FakeResponse(
-            {
-                "ticker": "AAPL",
-                "results": [
-                    {"t": 1778803200000, "o": 100.0, "h": 105.0, "l": 99.0, "c": 104.0, "v": 1234567},
-                    {"t": 1778889600000, "o": 104.0, "h": 110.0, "l": 103.0, "c": 108.0, "v": 2234567},
-                ],
-            }
-        )
-    )
+    session = FakeMassiveSession(FakeMassiveResponse(load_massive_fixture("aggregates_daily_success.json")))
 
     result = get_massive_price_history("aapl", "2026-05-15", "2026-05-16", session=session)
 
@@ -76,8 +46,8 @@ def test_get_massive_price_history_parses_daily_aggregates(monkeypatch):
 @pytest.mark.unit
 def test_massive_price_history_is_registered_for_structured_routing(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(
-        FakeResponse(
+    session = FakeMassiveSession(
+        FakeMassiveResponse(
             {
                 "ticker": "AAPL",
                 "results": [{"t": 1778803200000, "o": 1, "h": 2, "l": 1, "c": 2, "v": 10}],
@@ -122,7 +92,7 @@ def test_massive_price_history_is_not_implicit_fallback(monkeypatch):
 @pytest.mark.unit
 def test_massive_price_history_raises_no_data_for_empty_results(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"ticker": "AAPL", "results": []}))
+    session = FakeMassiveSession(FakeMassiveResponse({"ticker": "AAPL", "results": []}))
 
     with pytest.raises(ProviderNoDataError) as exc_info:
         get_massive_price_history("AAPL", "2026-05-15", "2026-05-16", session=session)
@@ -134,7 +104,7 @@ def test_massive_price_history_raises_no_data_for_empty_results(monkeypatch):
 @pytest.mark.unit
 def test_structured_massive_price_history_preserves_provider_error(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"ticker": "AAPL", "results": []}))
+    session = FakeMassiveSession(FakeMassiveResponse({"ticker": "AAPL", "results": []}))
     monkeypatch.setattr("tradingagents.dataflows.massive.requests.Session", lambda: session)
     config_module.set_config({"data_vendors": {"core_stock_apis": "massive"}})
 
@@ -159,7 +129,7 @@ def test_structured_massive_price_history_error_is_not_masked_by_configured_fall
         )
 
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"ticker": "AAPL", "results": []}))
+    session = FakeMassiveSession(FakeMassiveResponse({"ticker": "AAPL", "results": []}))
     monkeypatch.setattr("tradingagents.dataflows.massive.requests.Session", lambda: session)
     monkeypatch.setitem(
         structured.STRUCTURED_VENDOR_METHODS["get_price_history"],
@@ -188,7 +158,9 @@ def test_structured_massive_price_history_error_is_not_masked_by_configured_fall
 )
 def test_massive_price_history_maps_http_errors(monkeypatch, status_code, expected_error):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"error": "failed"}, status_code=status_code, headers={"Retry-After": "30"}))
+    session = FakeMassiveSession(
+        FakeMassiveResponse({"error": "failed"}, status_code=status_code, headers={"Retry-After": "30"})
+    )
 
     with pytest.raises(expected_error) as exc_info:
         get_massive_price_history("AAPL", "2026-05-15", "2026-05-16", session=session)
@@ -228,7 +200,7 @@ def test_massive_price_history_maps_transport_errors(monkeypatch):
 @pytest.mark.unit
 def test_massive_price_history_maps_malformed_rows(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"ticker": "AAPL", "results": [{"t": 1778803200000, "o": 1}]}))
+    session = FakeMassiveSession(FakeMassiveResponse({"ticker": "AAPL", "results": [{"t": 1778803200000, "o": 1}]}))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         get_massive_price_history("AAPL", "2026-05-15", "2026-05-16", session=session)

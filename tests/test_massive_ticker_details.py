@@ -4,31 +4,11 @@ import pytest
 
 import tradingagents.default_config as default_config
 import tradingagents.dataflows.config as config_module
+from massive_fakes import FakeMassiveResponse, FakeMassiveSession, load_massive_fixture
 from tradingagents.dataflows import structured
 from tradingagents.dataflows.exceptions import ProviderNoDataError, ProviderUnavailableError
 from tradingagents.dataflows.massive import MASSIVE_API_KEY_ENV, get_massive_ticker_details
 from tradingagents.dataflows.structured import AvailabilityStatus, TickerDetails
-
-
-class FakeResponse:
-    def __init__(self, payload, status_code=200, headers=None):
-        self._payload = payload
-        self.status_code = status_code
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
-
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
-        return self.response
 
 
 @pytest.fixture(autouse=True)
@@ -39,21 +19,7 @@ def reset_dataflows_config(monkeypatch):
 @pytest.mark.unit
 def test_get_massive_ticker_details_parses_reference_payload(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(
-        FakeResponse(
-            {
-                "results": {
-                    "ticker": "AAPL",
-                    "name": "Apple Inc.",
-                    "market": "stocks",
-                    "primary_exchange": "XNAS",
-                    "currency_name": "usd",
-                    "locale": "us",
-                    "active": True,
-                }
-            }
-        )
-    )
+    session = FakeMassiveSession(FakeMassiveResponse(load_massive_fixture("ticker_details_success.json")))
 
     result = get_massive_ticker_details("aapl", "2026-05-16", session=session)
 
@@ -74,17 +40,7 @@ def test_get_massive_ticker_details_parses_reference_payload(monkeypatch):
 @pytest.mark.unit
 def test_structured_get_ticker_details_routes_to_massive(monkeypatch):
     monkeypatch.setenv("MASSIVE_API_KEY", "test-key")
-    session = FakeSession(
-        FakeResponse(
-            {
-                "results": {
-                    "ticker": "AAPL",
-                    "name": "Apple Inc.",
-                    "active": True,
-                }
-            }
-        )
-    )
+    session = FakeMassiveSession(FakeMassiveResponse(load_massive_fixture("ticker_details_success.json")))
     monkeypatch.setattr("tradingagents.dataflows.massive.requests.Session", lambda: session)
     config_module.set_config({"data_vendors": {"core_stock_apis": "massive"}})
 
@@ -100,7 +56,7 @@ def test_structured_get_ticker_details_routes_to_massive(monkeypatch):
 @pytest.mark.unit
 def test_get_massive_ticker_details_records_missing_fields(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"results": {"ticker": "AAPL"}}))
+    session = FakeMassiveSession(FakeMassiveResponse(load_massive_fixture("ticker_details_missing_fields.json")))
 
     result = get_massive_ticker_details("AAPL", "2026-05-16", session=session)
 
@@ -121,7 +77,7 @@ def test_get_massive_ticker_details_records_missing_fields(monkeypatch):
 @pytest.mark.unit
 def test_get_massive_ticker_details_raises_no_data_for_missing_results(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse({"results": None}))
+    session = FakeMassiveSession(FakeMassiveResponse({"results": None}))
 
     with pytest.raises(ProviderNoDataError) as exc_info:
         get_massive_ticker_details("AAPL", "2026-05-16", session=session)
@@ -133,7 +89,7 @@ def test_get_massive_ticker_details_raises_no_data_for_missing_results(monkeypat
 @pytest.mark.unit
 def test_get_massive_ticker_details_maps_malformed_payload(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "test-key")
-    session = FakeSession(FakeResponse([]))
+    session = FakeMassiveSession(FakeMassiveResponse([]))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         get_massive_ticker_details("AAPL", "2026-05-16", session=session)

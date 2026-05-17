@@ -3,33 +3,13 @@ import traceback
 import pytest
 import requests
 
+from massive_fakes import FakeMassiveResponse, FakeMassiveSession
 from tradingagents.dataflows.exceptions import (
     ProviderAuthError,
     ProviderRateLimitError,
     ProviderUnavailableError,
 )
 from tradingagents.dataflows.massive import MASSIVE_API_KEY_ENV, request_massive_json
-
-
-class FakeResponse:
-    def __init__(self, payload, status_code=200, headers=None):
-        self._payload = payload
-        self.status_code = status_code
-        self.headers = headers or {}
-        self.text = str(payload)
-
-    def json(self):
-        return self._payload
-
-
-class FakeSession:
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
-
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
-        return self.response
 
 
 @pytest.mark.unit
@@ -46,7 +26,9 @@ class FakeSession:
 )
 def test_request_massive_json_maps_http_statuses(monkeypatch, status_code, expected_error):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "secret-test-key")
-    session = FakeSession(FakeResponse({"error": "failed"}, status_code=status_code, headers={"Retry-After": "45"}))
+    session = FakeMassiveSession(
+        FakeMassiveResponse({"error": "failed"}, status_code=status_code, headers={"Retry-After": "45"})
+    )
 
     with pytest.raises(expected_error) as exc_info:
         request_massive_json("/v3/test", {"ticker": "AAPL"}, method="test_method", session=session)
@@ -62,7 +44,9 @@ def test_request_massive_json_maps_http_statuses(monkeypatch, status_code, expec
 @pytest.mark.unit
 def test_request_massive_json_preserves_retry_after(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "secret-test-key")
-    session = FakeSession(FakeResponse({"error": "limited"}, status_code=429, headers={"Retry-After": "45"}))
+    session = FakeMassiveSession(
+        FakeMassiveResponse({"error": "limited"}, status_code=429, headers={"Retry-After": "45"})
+    )
 
     with pytest.raises(ProviderRateLimitError) as exc_info:
         request_massive_json("/v3/test", {"ticker": "AAPL"}, method="test_method", session=session)
@@ -81,7 +65,7 @@ class ConnectionErrorSession:
         raise requests.ConnectionError("connection failed with secret-test-key")
 
 
-class MalformedJsonResponse(FakeResponse):
+class MalformedJsonResponse(FakeMassiveResponse):
     def json(self):
         raise ValueError("not JSON with secret-test-key")
 
@@ -92,7 +76,7 @@ class MalformedJsonResponse(FakeResponse):
     [
         pytest.param(TimeoutSession(), id="timeout"),
         pytest.param(ConnectionErrorSession(), id="connection-error"),
-        pytest.param(FakeSession(MalformedJsonResponse("<html>no json</html>")), id="malformed-json"),
+        pytest.param(FakeMassiveSession(MalformedJsonResponse("<html>no json</html>")), id="malformed-json"),
     ],
 )
 def test_request_massive_json_redacts_low_level_error_tracebacks(monkeypatch, session):
@@ -129,7 +113,7 @@ def test_request_massive_json_maps_transport_errors(monkeypatch, session):
 @pytest.mark.unit
 def test_request_massive_json_maps_malformed_json(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "secret-test-key")
-    session = FakeSession(MalformedJsonResponse("<html>no json</html>"))
+    session = FakeMassiveSession(MalformedJsonResponse("<html>no json</html>"))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         request_massive_json("/v3/test", {"ticker": "AAPL"}, method="test_method", session=session)
@@ -144,7 +128,7 @@ def test_request_massive_json_maps_malformed_json(monkeypatch):
 @pytest.mark.unit
 def test_request_massive_json_maps_non_object_json(monkeypatch):
     monkeypatch.setenv(MASSIVE_API_KEY_ENV, "secret-test-key")
-    session = FakeSession(FakeResponse(["not", "an", "object"]))
+    session = FakeMassiveSession(FakeMassiveResponse(["not", "an", "object"]))
 
     with pytest.raises(ProviderUnavailableError) as exc_info:
         request_massive_json("/v3/test", {"ticker": "AAPL"}, method="test_method", session=session)
