@@ -156,6 +156,8 @@ export MASSIVE_API_KEY=...         # Massive market data
 
 Massive is optional and remains opt-in through data vendor configuration; `polygon` is accepted as a legacy config alias for `massive`.
 
+The Massive adapter is covered by mocked tests by default. A real provider smoke check is optional and should only be run when `MASSIVE_API_KEY` is set; the dedicated smoke test is introduced in Slice 2C-S7.
+
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
 For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.

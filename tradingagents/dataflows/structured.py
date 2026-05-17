@@ -30,6 +30,7 @@ STRUCTURED_VENDOR_METHODS: dict[str, dict[str, StructuredProvider]] = {
     "get_fundamentals_snapshot": {},
     "get_indicator_series": {},
 }
+EXPLICIT_ONLY_STRUCTURED_VENDORS = {"massive"}
 
 
 class AvailabilityStatus(str, Enum):
@@ -260,14 +261,20 @@ def _get_structured_vendor_config(method: str) -> str:
     return config.get("data_vendors", {}).get(category, "default")
 
 
-def _build_structured_fallback_chain(method: str) -> list[str]:
+def _configured_structured_vendors(method: str) -> list[str]:
     vendor_config = _get_structured_vendor_config(method)
-    configured_vendors = [vendor.strip() for vendor in vendor_config.split(",") if vendor.strip()]
+    return [vendor.strip() for vendor in vendor_config.split(",") if vendor.strip()]
+
+
+def _build_structured_fallback_chain(method: str) -> list[str]:
+    configured_vendors = _configured_structured_vendors(method)
     available_vendors = list(STRUCTURED_VENDOR_METHODS[method].keys())
 
     fallback_chain = configured_vendors.copy()
     for vendor in available_vendors:
         if vendor not in fallback_chain:
+            if vendor in EXPLICIT_ONLY_STRUCTURED_VENDORS:
+                continue
             fallback_chain.append(vendor)
 
     return fallback_chain
@@ -278,6 +285,7 @@ def route_structured_method(method: str, *args: Any, **kwargs: Any) -> Any:
     if method not in STRUCTURED_VENDOR_METHODS:
         raise ValueError(f"Structured method '{method}' not supported")
 
+    configured_vendors = set(_configured_structured_vendors(method))
     for vendor in _build_structured_fallback_chain(method):
         provider_impl = STRUCTURED_VENDOR_METHODS[method].get(vendor)
         if provider_impl is None:
@@ -285,7 +293,9 @@ def route_structured_method(method: str, *args: Any, **kwargs: Any) -> Any:
 
         try:
             return provider_impl(*args, **kwargs)
-        except DataProviderError:
+        except DataProviderError as exc:
+            if vendor in EXPLICIT_ONLY_STRUCTURED_VENDORS and vendor in configured_vendors:
+                raise exc
             continue
 
     raise RuntimeError(f"No available structured provider for '{method}'")
@@ -328,6 +338,11 @@ def get_indicator_series(
         window,
     )
     return _enforce_indicator_series_contract(series, as_of_date)
+
+
+from .massive import get_massive_price_history as _get_massive_price_history
+
+STRUCTURED_VENDOR_METHODS["get_price_history"]["massive"] = _get_massive_price_history
 
 
 __all__ = [
