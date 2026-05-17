@@ -1,6 +1,12 @@
+import copy
+
 import pandas as pd
 import pytest
 
+import tradingagents.default_config as default_config
+import tradingagents.dataflows.config as config_module
+from tradingagents.dataflows import structured
+from tradingagents.dataflows.exceptions import ProviderNoDataError
 from tradingagents.dataflows.structured import (
     AvailabilityStatus,
     DataAvailability,
@@ -8,7 +14,13 @@ from tradingagents.dataflows.structured import (
     IndicatorSeries,
     PRICE_HISTORY_COLUMNS,
     PriceHistory,
+    TickerDetails,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_dataflows_config(monkeypatch):
+    monkeypatch.setattr(config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG))
 
 
 @pytest.mark.unit
@@ -118,3 +130,102 @@ def test_indicator_series_and_availability_metadata_are_importable_contracts():
     assert series.availability == [availability]
     assert AvailabilityStatus.MISSING.value == "missing"
     assert AvailabilityStatus.STALE.value == "stale"
+
+
+@pytest.mark.unit
+def test_ticker_details_tracks_reference_metadata_and_availability():
+    availability = [
+        DataAvailability(
+            field="currency",
+            status=AvailabilityStatus.MISSING,
+            message="Massive response did not include currency",
+            provider="massive",
+        )
+    ]
+
+    details = TickerDetails(
+        ticker="AAPL",
+        as_of="2026-05-16",
+        name="Apple Inc.",
+        market="stocks",
+        exchange="XNAS",
+        currency=None,
+        locale="us",
+        active=True,
+        availability=availability,
+    )
+
+    assert details.ticker == "AAPL"
+    assert details.as_of == "2026-05-16"
+    assert details.name == "Apple Inc."
+    assert details.market == "stocks"
+    assert details.exchange == "XNAS"
+    assert details.currency is None
+    assert details.locale == "us"
+    assert details.active is True
+    assert details.availability == availability
+
+
+@pytest.mark.unit
+def test_get_ticker_details_routes_through_core_stock_config(monkeypatch):
+    calls = []
+
+    def fake_details(ticker: str, as_of: str) -> TickerDetails:
+        calls.append((ticker, as_of))
+        return TickerDetails(ticker=ticker, as_of=as_of, name="Apple Inc.")
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_ticker_details"],
+        "fake_details",
+        fake_details,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "fake_details"}})
+
+    details = structured.get_ticker_details("AAPL", "2026-05-16")
+
+    assert details.name == "Apple Inc."
+    assert calls == [("AAPL", "2026-05-16")]
+
+
+@pytest.mark.unit
+def test_get_ticker_details_rejects_invalid_as_of_before_provider_call(monkeypatch):
+    calls = []
+
+    def should_not_run(ticker: str, as_of: str) -> TickerDetails:
+        calls.append((ticker, as_of))
+        return TickerDetails(ticker=ticker, as_of=as_of)
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_ticker_details"],
+        "fake_details",
+        should_not_run,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "fake_details"}})
+
+    with pytest.raises(ValueError, match="as_of must be a YYYY-MM-DD date"):
+        structured.get_ticker_details("AAPL", "2026/05/16")
+
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_get_ticker_details_rejects_provider_metadata_after_as_of(monkeypatch):
+    def future_details(ticker: str, as_of: str) -> TickerDetails:
+        return TickerDetails(ticker=ticker, as_of="2026-05-17")
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_ticker_details"],
+        "future_details",
+        future_details,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "future_details"}})
+
+    with pytest.raises(ProviderNoDataError) as exc_info:
+        structured.get_ticker_details("AAPL", "2026-05-16")
+
+    assert exc_info.value.method == "get_ticker_details"
+    assert exc_info.value.details == {
+        "ticker": "AAPL",
+        "as_of": "2026-05-16",
+        "details_as_of": "2026-05-17",
+    }

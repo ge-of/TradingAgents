@@ -74,6 +74,7 @@ The core architecture is built around a per-ticker LangGraph workflow. Each run 
 `tradingagents/agents/schemas.py` owns typed decision schemas and render helpers. Keep structured output concentrated here unless a new feature truly needs a stable typed contract.
 
 `tradingagents/dataflows/` owns market, news, social, and fundamentals data access. Existing LangChain tools call `route_to_vendor()` and return strings/report blocks for LLM consumption. Numeric screening or portfolio optimization should use a separate structured data contract instead of scraping prose tool output.
+Ticker reference metadata, when needed by downstream quantitative workflows, should use structured data contracts with explicit missing-field availability records rather than agent-facing prose reports.
 
 `tradingagents/llm_clients/` owns provider abstraction, model catalog, API-key mapping, validation, content normalization, and provider quirks. Add provider quirks through capability tables or provider client wrappers, not scattered checks in agents.
 

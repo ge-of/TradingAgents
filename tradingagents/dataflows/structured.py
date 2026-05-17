@@ -21,12 +21,14 @@ StructuredProvider = Callable[..., Any]
 
 STRUCTURED_METHOD_CATEGORIES = {
     "get_price_history": "core_stock_apis",
+    "get_ticker_details": "core_stock_apis",
     "get_fundamentals_snapshot": "fundamental_data",
     "get_indicator_series": "technical_indicators",
 }
 
 STRUCTURED_VENDOR_METHODS: dict[str, dict[str, StructuredProvider]] = {
     "get_price_history": {},
+    "get_ticker_details": {},
     "get_fundamentals_snapshot": {},
     "get_indicator_series": {},
 }
@@ -91,6 +93,21 @@ class PriceHistory:
     high_52w: float | None = None
     low_52w: float | None = None
     proximity_to_52w_high: float | None = None
+    availability: list[DataAvailability] = field(default_factory=list)
+
+
+@dataclass
+class TickerDetails:
+    """Structured reference metadata for a ticker."""
+
+    ticker: str
+    as_of: str
+    name: str | None = None
+    market: str | None = None
+    exchange: str | None = None
+    currency: str | None = None
+    locale: str | None = None
+    active: bool | None = None
     availability: list[DataAvailability] = field(default_factory=list)
 
 
@@ -214,6 +231,25 @@ def _enforce_fundamentals_contract(
     return snapshot
 
 
+def _enforce_ticker_details_contract(
+    details: TickerDetails,
+    requested_as_of: date,
+) -> TickerDetails:
+    details_as_of = _parse_iso_date(details.as_of, "details.as_of")
+    if details_as_of > requested_as_of:
+        raise ProviderNoDataError(
+            f"No usable ticker details for {details.ticker} on or before {requested_as_of.isoformat()}",
+            provider=None,
+            method="get_ticker_details",
+            details={
+                "ticker": details.ticker,
+                "as_of": requested_as_of.isoformat(),
+                "details_as_of": details.as_of,
+            },
+        )
+    return details
+
+
 def _latest_numeric_indicator_value(values: pd.DataFrame, indicator: str) -> float | None:
     candidate_columns = [indicator, indicator.upper()]
     candidate_columns.extend(col for col in values.columns if col not in {"Date", indicator, indicator.upper()})
@@ -312,6 +348,13 @@ def get_price_history(ticker: str, start: str, end: str) -> PriceHistory:
     return _enforce_price_history_contract(history, start_date, end_date)
 
 
+def get_ticker_details(ticker: str, as_of: str) -> TickerDetails:
+    """Return structured reference metadata from the configured provider."""
+    as_of_date = _parse_iso_date(as_of, "as_of")
+    details = route_structured_method("get_ticker_details", ticker, as_of_date.isoformat())
+    return _enforce_ticker_details_contract(details, as_of_date)
+
+
 def get_fundamentals_snapshot(ticker: str, as_of: str) -> FundamentalsSnapshot:
     """Return structured fundamentals from the configured structured provider."""
     as_of_date = _parse_iso_date(as_of, "as_of")
@@ -340,9 +383,13 @@ def get_indicator_series(
     return _enforce_indicator_series_contract(series, as_of_date)
 
 
-from .massive import get_massive_price_history as _get_massive_price_history
+from .massive import (
+    get_massive_price_history as _get_massive_price_history,
+    get_massive_ticker_details as _get_massive_ticker_details,
+)
 
 STRUCTURED_VENDOR_METHODS["get_price_history"]["massive"] = _get_massive_price_history
+STRUCTURED_VENDOR_METHODS["get_ticker_details"]["massive"] = _get_massive_ticker_details
 
 
 __all__ = [
@@ -354,8 +401,10 @@ __all__ = [
     "PriceHistory",
     "STRUCTURED_METHOD_CATEGORIES",
     "STRUCTURED_VENDOR_METHODS",
+    "TickerDetails",
     "get_fundamentals_snapshot",
     "get_indicator_series",
     "get_price_history",
+    "get_ticker_details",
     "route_structured_method",
 ]
