@@ -9,11 +9,14 @@ from tradingagents.dataflows import structured
 from tradingagents.dataflows.exceptions import ProviderNoDataError
 from tradingagents.dataflows.structured import (
     AvailabilityStatus,
+    CorporateActions,
     DataAvailability,
+    DividendEvent,
     FundamentalsSnapshot,
     IndicatorSeries,
     PRICE_HISTORY_COLUMNS,
     PriceHistory,
+    SplitEvent,
     TickerDetails,
 )
 
@@ -164,6 +167,107 @@ def test_ticker_details_tracks_reference_metadata_and_availability():
     assert details.locale == "us"
     assert details.active is True
     assert details.availability == availability
+
+
+@pytest.mark.unit
+def test_corporate_actions_hold_dividends_splits_and_availability():
+    dividend = DividendEvent(
+        ticker="AAPL",
+        ex_dividend_date="2026-05-10",
+        pay_date="2026-05-20",
+        cash_amount=0.26,
+        currency="usd",
+    )
+    split = SplitEvent(
+        ticker="AAPL",
+        execution_date="2026-05-12",
+        split_from=1.0,
+        split_to=4.0,
+    )
+    availability = [
+        DataAvailability(
+            field="dividends",
+            status=AvailabilityStatus.AVAILABLE,
+            message="dividend events available",
+            provider="massive",
+        )
+    ]
+
+    actions = CorporateActions(
+        ticker="AAPL",
+        start="2026-05-01",
+        end="2026-05-31",
+        dividends=[dividend],
+        splits=[split],
+        availability=availability,
+    )
+
+    assert actions.dividends == [dividend]
+    assert actions.splits == [split]
+    assert actions.availability == availability
+
+
+@pytest.mark.unit
+def test_get_corporate_actions_routes_through_core_stock_config(monkeypatch):
+    calls = []
+
+    def fake_corporate_actions(ticker: str, start: str, end: str) -> CorporateActions:
+        calls.append((ticker, start, end))
+        return CorporateActions(ticker=ticker, start=start, end=end)
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_corporate_actions"],
+        "fake_actions",
+        fake_corporate_actions,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "fake_actions"}})
+
+    actions = structured.get_corporate_actions("AAPL", "2026-05-01", "2026-05-31")
+
+    assert isinstance(actions, CorporateActions)
+    assert calls == [("AAPL", "2026-05-01", "2026-05-31")]
+
+
+@pytest.mark.unit
+def test_get_corporate_actions_rejects_invalid_dates_before_provider_call(monkeypatch):
+    calls = []
+
+    def should_not_run(ticker: str, start: str, end: str) -> CorporateActions:
+        calls.append((ticker, start, end))
+        return CorporateActions(ticker=ticker, start=start, end=end)
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_corporate_actions"],
+        "fake_actions",
+        should_not_run,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "fake_actions"}})
+
+    with pytest.raises(ValueError, match="start must be a YYYY-MM-DD date"):
+        structured.get_corporate_actions("AAPL", "2026/05/01", "2026-05-31")
+
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_get_corporate_actions_rejects_start_after_end_before_provider_call(monkeypatch):
+    calls = []
+
+    def should_not_run(ticker: str, start: str, end: str) -> CorporateActions:
+        calls.append((ticker, start, end))
+        return CorporateActions(ticker=ticker, start=start, end=end)
+
+    monkeypatch.setitem(
+        structured.STRUCTURED_VENDOR_METHODS["get_corporate_actions"],
+        "fake_actions",
+        should_not_run,
+    )
+    config_module.set_config({"data_vendors": {"core_stock_apis": "fake_actions"}})
+
+    with pytest.raises(ValueError, match="start must be on or before end"):
+        structured.get_corporate_actions("AAPL", "2026-06-01", "2026-05-31")
+
+    assert calls == []
 
 
 @pytest.mark.unit

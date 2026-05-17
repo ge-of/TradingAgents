@@ -20,6 +20,7 @@ PRICE_HISTORY_COLUMNS = ("Date", "Open", "High", "Low", "Close", "Volume")
 StructuredProvider = Callable[..., Any]
 
 STRUCTURED_METHOD_CATEGORIES = {
+    "get_corporate_actions": "core_stock_apis",
     "get_price_history": "core_stock_apis",
     "get_ticker_details": "core_stock_apis",
     "get_fundamentals_snapshot": "fundamental_data",
@@ -27,6 +28,7 @@ STRUCTURED_METHOD_CATEGORIES = {
 }
 
 STRUCTURED_VENDOR_METHODS: dict[str, dict[str, StructuredProvider]] = {
+    "get_corporate_actions": {},
     "get_price_history": {},
     "get_ticker_details": {},
     "get_fundamentals_snapshot": {},
@@ -51,6 +53,39 @@ class DataAvailability:
     status: AvailabilityStatus
     message: str
     provider: str | None = None
+
+
+@dataclass
+class DividendEvent:
+    """Cash dividend event for a ticker."""
+
+    ticker: str
+    ex_dividend_date: str
+    pay_date: str | None = None
+    cash_amount: float | None = None
+    currency: str | None = None
+
+
+@dataclass
+class SplitEvent:
+    """Stock split event for a ticker."""
+
+    ticker: str
+    execution_date: str
+    split_from: float
+    split_to: float
+
+
+@dataclass
+class CorporateActions:
+    """Structured corporate actions for a ticker over a date range."""
+
+    ticker: str
+    start: str
+    end: str
+    dividends: list[DividendEvent] = field(default_factory=list)
+    splits: list[SplitEvent] = field(default_factory=list)
+    availability: list[DataAvailability] = field(default_factory=list)
 
 
 @dataclass
@@ -348,6 +383,16 @@ def get_price_history(ticker: str, start: str, end: str) -> PriceHistory:
     return _enforce_price_history_contract(history, start_date, end_date)
 
 
+def get_corporate_actions(ticker: str, start: str, end: str) -> CorporateActions:
+    """Return structured corporate actions from the configured structured provider."""
+    start_date = _parse_iso_date(start, "start")
+    end_date = _parse_iso_date(end, "end")
+    if start_date > end_date:
+        raise ValueError("start must be on or before end")
+
+    return route_structured_method("get_corporate_actions", ticker, start_date.isoformat(), end_date.isoformat())
+
+
 def get_ticker_details(ticker: str, as_of: str) -> TickerDetails:
     """Return structured reference metadata from the configured provider."""
     as_of_date = _parse_iso_date(as_of, "as_of")
@@ -384,24 +429,30 @@ def get_indicator_series(
 
 
 from .massive import (
+    get_massive_corporate_actions as _get_massive_corporate_actions,
     get_massive_price_history as _get_massive_price_history,
     get_massive_ticker_details as _get_massive_ticker_details,
 )
 
+STRUCTURED_VENDOR_METHODS["get_corporate_actions"]["massive"] = _get_massive_corporate_actions
 STRUCTURED_VENDOR_METHODS["get_price_history"]["massive"] = _get_massive_price_history
 STRUCTURED_VENDOR_METHODS["get_ticker_details"]["massive"] = _get_massive_ticker_details
 
 
 __all__ = [
     "AvailabilityStatus",
+    "CorporateActions",
     "DataAvailability",
+    "DividendEvent",
     "FundamentalsSnapshot",
     "IndicatorSeries",
     "PRICE_HISTORY_COLUMNS",
     "PriceHistory",
     "STRUCTURED_METHOD_CATEGORIES",
     "STRUCTURED_VENDOR_METHODS",
+    "SplitEvent",
     "TickerDetails",
+    "get_corporate_actions",
     "get_fundamentals_snapshot",
     "get_indicator_series",
     "get_price_history",
