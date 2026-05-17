@@ -135,7 +135,7 @@ docker compose --profile ollama run --rm tradingagents-ollama
 
 ### Required APIs
 
-TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
+TradingAgents supports multiple LLM providers. Set the API key for your chosen provider; market-data provider keys are optional unless configured:
 
 ```bash
 export OPENAI_API_KEY=...          # OpenAI (GPT)
@@ -151,7 +151,10 @@ export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io, M2.x, 2
 export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com, M2.x, 204K ctx)
 export OPENROUTER_API_KEY=...      # OpenRouter
 export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+export MASSIVE_API_KEY=...         # Massive market data
 ```
+
+Massive is optional and remains opt-in through data vendor configuration; `polygon` is accepted as a legacy config alias for `massive`.
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
