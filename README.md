@@ -160,7 +160,17 @@ Massive historical price history uses adjusted daily bars by default. Dividends 
 
 Massive provider errors are normalized before fallback: HTTP 401/403 indicate missing, invalid, or unauthorized `MASSIVE_API_KEY`; HTTP 429 indicates provider rate limits or quota; HTTP 5xx, timeouts, and malformed responses are treated as provider-unavailable errors. Error diagnostics do not include the API key.
 
-The Massive adapter is covered by mocked tests by default. A real provider smoke check is optional and should only be run when `MASSIVE_API_KEY` is set; the dedicated smoke test is introduced in Slice 2C-S7.
+#### Optional Massive live smoke check
+
+The default test suite uses mocked Massive payloads and does not require provider credentials. To verify real Massive connectivity locally, run the smoke check explicitly:
+
+```bash
+RUN_MASSIVE_LIVE_SMOKE=1 MASSIVE_API_KEY=... uv run pytest tests/test_massive_live_smoke.py -q -m "integration and smoke"
+```
+
+Replace `...` with a real Massive key before running the live smoke check.
+
+This command may consume provider quota. Do not enable it in default CI.
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
